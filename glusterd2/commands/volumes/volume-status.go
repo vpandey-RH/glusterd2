@@ -52,38 +52,40 @@ func checkStatus(ctx transaction.TxnCtx) error {
 
 	var brickStatuses []*brickstatus
 
-	for _, binfo := range vol.Bricks {
-		// Skip bricks that aren't on this node.
-		if uuid.Equal(binfo.NodeID, gdctx.MyUUID) == false {
-			continue
-		}
-
-		var port int
-
-		brickDaemon, err := brick.NewGlusterfsd(binfo)
-		if err != nil {
-			return err
-		}
-
-		online := false
-
-		pid, err := daemon.ReadPidFromFile(brickDaemon.PidFile())
-		if err == nil {
-			// Check if process is running
-			_, err := daemon.GetProcess(pid)
-			if err == nil {
-				online = true
-				port = pmap.RegistrySearch(binfo.Path, pmap.GfPmapPortBrickserver)
+	for _, subvol := range vol.Subvols {
+		for _, binfo := range subvol.Bricks {
+			// Skip bricks that aren't on this node.
+			if uuid.Equal(binfo.NodeID, gdctx.MyUUID) == false {
+				continue
 			}
-		}
 
-		brickStatus := &brickstatus{
-			Info:   binfo,
-			Online: online,
-			Pid:    pid,
-			Port:   port,
+			var port int
+
+			brickDaemon, err := brick.NewGlusterfsd(binfo)
+			if err != nil {
+				return err
+			}
+
+			online := false
+
+			pid, err := daemon.ReadPidFromFile(brickDaemon.PidFile())
+			if err == nil {
+				// Check if process is running
+				_, err := daemon.GetProcess(pid)
+				if err == nil {
+					online = true
+					port = pmap.RegistrySearch(binfo.Path, pmap.GfPmapPortBrickserver)
+				}
+			}
+
+			brickStatus := &brickstatus{
+				Info:   binfo,
+				Online: online,
+				Pid:    pid,
+				Port:   port,
+			}
+			brickStatuses = append(brickStatuses, brickStatus)
 		}
-		brickStatuses = append(brickStatuses, brickStatus)
 	}
 
 	// Store the results in transaction context. This will be consumed by
@@ -150,9 +152,11 @@ func createVolumeStatusResp(ctx transaction.TxnCtx, vol *volume.Volinfo) (*api.V
 
 	bmap := make(map[string]*api.BrickStatus)
 
-	for _, b := range vol.Bricks {
-		bmap[b.ID.String()] = &api.BrickStatus{
-			Info: createBrickInfo(&b),
+	for _, subvol := range vol.Subvols {
+		for _, b := range subvol.Bricks {
+			bmap[b.ID.String()] = &api.BrickStatus{
+				Info: createBrickInfo(&b),
+			}
 		}
 	}
 

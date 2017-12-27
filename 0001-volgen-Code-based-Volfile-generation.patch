@@ -1,0 +1,2959 @@
+From ea7a9dde878a3f22b1f56acbcad41ee3aecff23d Mon Sep 17 00:00:00 2001
+From: Aravinda VK <avishwan@redhat.com>
+Date: Wed, 20 Dec 2017 14:02:27 +0530
+Subject: [PATCH] volgen: Code based Volfile generation
+
+Sub volumes support is added to Volinfo. Code based volfile generation
+is implemented(Still exploring the possible approach to do that based on
+input json/yml/toml)
+
+All volfiles available in `$SRC/glusterd2/volgen2/volfile_*.go`
+
+Features:
+
+- Easy to add condition while generating volfile(For example, bitrot
+  volfile only contains local bricks information)
+- Easy to generate Cluster level, Volume level and Brick level volfiles
+- Adding new volfile support is easy(Add one file)
+- Full access to Cluster Info/Volume Info/Brick Info
+- All supported volfiles are available now
+- All generated volfiles are stored in etcd
+- REST endpoint available to trigger regeneration of volfiles(Selective
+  regeneration not yet available)
+
+Limitations:
+- Currently limited to code based volfile generation. If new volfile
+  added or modified, Glusterd2 need to be recompiled. I tried template
+  based approach to support cluster volfiles but it is getting over
+  complecated. If this is not blocker now, we can proceed with this
+  approach.
+
+Future:
+- Template file(json/yml/toml) support can be added on top of
+  this if required.
+
+Fixes: #388
+Signed-off-by: Aravinda VK <avishwan@redhat.com>
+---
+ e2e/georep_test.go                               |  24 +-
+ e2e/restart_test.go                              |   9 +-
+ e2e/volume_ops_test.go                           |  50 ++--
+ glustercli/cmd/volume.go                         |  93 ++++++--
+ glusterd2/brick/types.go                         |  12 +
+ glusterd2/commands/peers/deletepeer.go           |   8 +-
+ glusterd2/commands/volumes/commands.go           |  12 +
+ glusterd2/commands/volumes/common.go             |  47 +---
+ glusterd2/commands/volumes/utils.go              |  40 ++--
+ glusterd2/commands/volumes/volfiles.go           |  36 +++
+ glusterd2/commands/volumes/volume-create.go      | 143 ++++++++----
+ glusterd2/commands/volumes/volume-create_test.go |  14 +-
+ glusterd2/commands/volumes/volume-delete.go      |  24 +-
+ glusterd2/commands/volumes/volume-expand.go      |  85 ++++---
+ glusterd2/commands/volumes/volume-option.go      |   5 -
+ glusterd2/commands/volumes/volume-start.go       |  44 ++--
+ glusterd2/commands/volumes/volume-status.go      |  58 ++---
+ glusterd2/commands/volumes/volume-stop.go        |  79 +++----
+ glusterd2/servers/sunrpc/handshake_prog.go       |  43 ++--
+ glusterd2/volgen/cluster-graph.go                |  14 +-
+ glusterd2/volgen/volgen.go                       |   8 +-
+ glusterd2/volgen2/generate.go                    | 145 ++++++++++++
+ glusterd2/volgen2/register.go                    |  36 +++
+ glusterd2/volgen2/store-utils.go                 |  36 +++
+ glusterd2/volgen2/volfile_bitd.go                |  35 +++
+ glusterd2/volgen2/volfile_brick.go               |  49 ++++
+ glusterd2/volgen2/volfile_fuse.go                |  40 ++++
+ glusterd2/volgen2/volfile_gfproxy.go             |  49 ++++
+ glusterd2/volgen2/volfile_quotad.go              |  40 ++++
+ glusterd2/volgen2/volfile_rebalance.go           |  32 +++
+ glusterd2/volgen2/volfile_shd.go                 |  31 +++
+ glusterd2/volgen2/volgen.go                      | 277 +++++++++++++++++++++++
+ glusterd2/volume/struct.go                       |  90 +++++---
+ glusterd2/volume/volume-utils.go                 |  10 +-
+ glusterd2/volume/volume_test.go                  |  19 +-
+ pkg/api/bricktype.go                             |  12 +
+ pkg/api/bricktype_jsonenums.go                   |  56 +++++
+ pkg/api/subvoltype.go                            |  14 ++
+ pkg/api/subvoltype_jsonenums.go                  |  59 +++++
+ pkg/api/volume_req.go                            |  25 +-
+ pkg/api/volume_resp.go                           |  13 +-
+ pkg/restclient/examples/main.go                  |  39 ----
+ plugins/georeplication/rest.go                   |  50 ++--
+ plugins/georeplication/transactions.go           |  50 ++--
+ 44 files changed, 1573 insertions(+), 482 deletions(-)
+ create mode 100644 glusterd2/commands/volumes/volfiles.go
+ create mode 100644 glusterd2/volgen2/generate.go
+ create mode 100644 glusterd2/volgen2/register.go
+ create mode 100644 glusterd2/volgen2/store-utils.go
+ create mode 100644 glusterd2/volgen2/volfile_bitd.go
+ create mode 100644 glusterd2/volgen2/volfile_brick.go
+ create mode 100644 glusterd2/volgen2/volfile_fuse.go
+ create mode 100644 glusterd2/volgen2/volfile_gfproxy.go
+ create mode 100644 glusterd2/volgen2/volfile_quotad.go
+ create mode 100644 glusterd2/volgen2/volfile_rebalance.go
+ create mode 100644 glusterd2/volgen2/volfile_shd.go
+ create mode 100644 glusterd2/volgen2/volgen.go
+ create mode 100644 pkg/api/bricktype.go
+ create mode 100644 pkg/api/bricktype_jsonenums.go
+ create mode 100644 pkg/api/subvoltype.go
+ create mode 100644 pkg/api/subvoltype_jsonenums.go
+ delete mode 100644 pkg/restclient/examples/main.go
+
+diff --git a/e2e/georep_test.go b/e2e/georep_test.go
+index 6166abd..5e3bb92 100644
+--- a/e2e/georep_test.go
++++ b/e2e/georep_test.go
+@@ -33,9 +33,15 @@ func TestGeorepCreateDelete(t *testing.T) {
+ 	volname1 := "testvol1"
+ 	reqVol := api.VolCreateReq{
+ 		Name: volname1,
+-		Bricks: []string{
+-			gds[0].PeerID() + ":" + brickPaths[0],
+-			gds[0].PeerID() + ":" + brickPaths[1]},
++		Subvols: []api.SubvolReq{
++			{
++				Type: "distribute",
++				Bricks: []api.BrickReq{
++					{NodeID: gds[0].PeerID(), Path: brickPaths[0]},
++					{NodeID: gds[0].PeerID(), Path: brickPaths[1]},
++				},
++			},
++		},
+ 		Force: true,
+ 	}
+ 	vol1, err := client.VolumeCreate(reqVol)
+@@ -44,9 +50,15 @@ func TestGeorepCreateDelete(t *testing.T) {
+ 	volname2 := "testvol2"
+ 	reqVol = api.VolCreateReq{
+ 		Name: volname2,
+-		Bricks: []string{
+-			gds[1].PeerID() + ":" + brickPaths[2],
+-			gds[1].PeerID() + ":" + brickPaths[3]},
++		Subvols: []api.SubvolReq{
++			{
++				Type: "distribute",
++				Bricks: []api.BrickReq{
++					{NodeID: gds[1].PeerID(), Path: brickPaths[2]},
++					{NodeID: gds[1].PeerID(), Path: brickPaths[3]},
++				},
++			},
++		},
+ 		Force: true,
+ 	}
+ 	vol2, err := client.VolumeCreate(reqVol)
+diff --git a/e2e/restart_test.go b/e2e/restart_test.go
+index 9d142da..1331201 100644
+--- a/e2e/restart_test.go
++++ b/e2e/restart_test.go
+@@ -25,8 +25,13 @@ func TestRestart(t *testing.T) {
+ 
+ 	createReq := api.VolCreateReq{
+ 		Name: "vol1",
+-		Bricks: []string{
+-			gd.PeerID() + ":" + dir,
++		Subvols: []api.SubvolReq{
++			{
++				Type: "distribute",
++				Bricks: []api.BrickReq{
++					{NodeID: gd.PeerID(), Path: dir},
++				},
++			},
+ 		},
+ 		Force: true,
+ 	}
+diff --git a/e2e/volume_ops_test.go b/e2e/volume_ops_test.go
+index e526057..b221ff3 100644
+--- a/e2e/volume_ops_test.go
++++ b/e2e/volume_ops_test.go
+@@ -72,13 +72,25 @@ func testVolumeCreate(t *testing.T) {
+ 
+ 	// create 2x2 dist-rep volume
+ 	createReq := api.VolCreateReq{
+-		Name:    volname,
+-		Replica: 2,
+-		Bricks: []string{
+-			gds[0].PeerID() + ":" + brickPaths[0],
+-			gds[1].PeerID() + ":" + brickPaths[1],
+-			gds[0].PeerID() + ":" + brickPaths[2],
+-			gds[1].PeerID() + ":" + brickPaths[3]},
++		Name: volname,
++		Subvols: []api.SubvolReq{
++			{
++				ReplicaCount: 2,
++				Type:         "replicate",
++				Bricks: []api.BrickReq{
++					{NodeID: gds[0].PeerID(), Path: brickPaths[0]},
++					{NodeID: gds[1].PeerID(), Path: brickPaths[1]},
++				},
++			},
++			{
++				Type:         "replicate",
++				ReplicaCount: 2,
++				Bricks: []api.BrickReq{
++					{NodeID: gds[0].PeerID(), Path: brickPaths[2]},
++					{NodeID: gds[1].PeerID(), Path: brickPaths[3]},
++				},
++			},
++		},
+ 		Force: true,
+ 	}
+ 	_, err := client.VolumeCreate(createReq)
+@@ -96,12 +108,11 @@ func testVolumeExpand(t *testing.T) {
+ 	}
+ 
+ 	expandReq := api.VolExpandReq{
+-		ReplicaCount: 2,
+-		Bricks: []string{
+-			gds[0].PeerID() + ":" + brickPaths[0],
+-			gds[1].PeerID() + ":" + brickPaths[1],
+-			gds[0].PeerID() + ":" + brickPaths[2],
+-			gds[1].PeerID() + ":" + brickPaths[3],
++		Bricks: []api.BrickReq{
++			{NodeID: gds[0].PeerID(), Path: brickPaths[0]},
++			{NodeID: gds[1].PeerID(), Path: brickPaths[1]},
++			{NodeID: gds[0].PeerID(), Path: brickPaths[2]},
++			{NodeID: gds[1].PeerID(), Path: brickPaths[3]},
+ 		},
+ 	}
+ 	_, err := client.VolumeExpand(volname, expandReq)
+@@ -191,9 +202,16 @@ func TestVolumeOptions(t *testing.T) {
+ 
+ 	volname := "testvol"
+ 	createReq := api.VolCreateReq{
+-		Name:   volname,
+-		Bricks: []string{gds[0].PeerID() + ":" + brickPath},
+-		Force:  true,
++		Name: volname,
++		Subvols: []api.SubvolReq{
++			{
++				Type: "distribute",
++				Bricks: []api.BrickReq{
++					{NodeID: gds[0].PeerID(), Path: brickPath},
++				},
++			},
++		},
++		Force: true,
+ 	}
+ 
+ 	// valid option test cases
+diff --git a/glustercli/cmd/volume.go b/glustercli/cmd/volume.go
+index 83cf963..2832eee 100644
+--- a/glustercli/cmd/volume.go
++++ b/glustercli/cmd/volume.go
+@@ -90,7 +90,7 @@ var volumeCmd = &cobra.Command{
+ 	Short: helpVolumeCmd,
+ }
+ 
+-func bricksAsUUID(bricks []string) ([]string, error) {
++func bricksAsUUID(bricks []string) ([]api.BrickReq, error) {
+ 
+ 	// validate if <host> in <host>:<path> is already UUID
+ 	validUUIDs := 0
+@@ -104,7 +104,15 @@ func bricksAsUUID(bricks []string) ([]string, error) {
+ 
+ 	if validUUIDs == len(bricks) {
+ 		// bricks are already of the format <uuid>:<path>
+-		return bricks, nil
++		var bs []api.BrickReq
++		for _, b := range bricks {
++			bData := strings.Split(b, ":")
++			bs = append(bs, api.BrickReq{
++				NodeID: bData[0],
++				Path:   bData[1],
++			})
++		}
++		return bs, nil
+ 	}
+ 
+ 	peers, err := client.Peers()
+@@ -112,7 +120,7 @@ func bricksAsUUID(bricks []string) ([]string, error) {
+ 		return nil, err
+ 	}
+ 
+-	var brickUUIDs []string
++	var brickUUIDs []api.BrickReq
+ 
+ 	for _, brick := range bricks {
+ 		host := strings.Split(brick, ":")[0]
+@@ -121,7 +129,10 @@ func bricksAsUUID(bricks []string) ([]string, error) {
+ 			for _, addr := range peer.Addresses {
+ 				// TODO: Normalize presence/absence of port in peer address
+ 				if strings.Split(addr, ":")[0] == strings.Split(host, ":")[0] {
+-					brickUUIDs = append(brickUUIDs, peer.ID.String()+":"+path)
++					brickUUIDs = append(brickUUIDs, api.BrickReq{
++						NodeID: peer.ID.String(),
++						Path:   path,
++					})
+ 				}
+ 			}
+ 		}
+@@ -145,11 +156,41 @@ var volumeCreateCmd = &cobra.Command{
+ 			log.WithField("volume", volname).Println("volume creation failed")
+ 			failure(fmt.Sprintf("Error getting brick UUIDs: %s", err.Error()), 1)
+ 		}
++
++		numBricks := len(bricks)
++		subvols := []api.SubvolReq{}
++		if flagCreateCmdReplicaCount > 0 {
++			// Replicate Volume Support
++			numSubvols := numBricks / flagCreateCmdReplicaCount
++
++			for i := 0; i < numSubvols; i++ {
++				idx := i * flagCreateCmdReplicaCount
++
++				// If Arbiter is set, set it as Brick Type for last brick
++				if flagCreateCmdArbiterCount > 0 {
++					bricks[idx+flagCreateCmdReplicaCount].Type = "arbiter"
++				}
++
++				subvols = append(subvols, api.SubvolReq{
++					Type:         "replicate",
++					Bricks:       bricks[idx : idx+flagCreateCmdReplicaCount],
++					ReplicaCount: flagCreateCmdReplicaCount,
++					ArbiterCount: flagCreateCmdArbiterCount,
++				})
++			}
++		} else {
++			// Default Distribute Volume
++			subvols = []api.SubvolReq{
++				{
++					Type:   "distribute",
++					Bricks: bricks,
++				},
++			}
++		}
++
+ 		vol, err := client.VolumeCreate(api.VolCreateReq{
+ 			Name:    volname,
+-			Bricks:  bricks, // string of format <UUID>:<path>
+-			Replica: flagCreateCmdReplicaCount,
+-			Arbiter: flagCreateCmdArbiterCount,
++			Subvols: subvols,
+ 			Force:   flagCreateCmdForce,
+ 		})
+ 		if err != nil {
+@@ -264,21 +305,23 @@ var volumeResetCmd = &cobra.Command{
+ 
+ func volumeInfoDisplayNumbricks(vol api.VolumeGetResp) {
+ 
+-	var DistCount = vol.DistCount
+-	var RepCount = vol.ReplicaCount
+-	var ArbCount = vol.ArbiterCount
++	var DistCount = len(vol.Subvols)
++	// TODO: Assumption as all subvol types are same
++	var RepCount = vol.Subvols[0].ReplicaCount
++	var ArbCount = vol.Subvols[0].ArbiterCount
++	numBricks := 0
++	for _, subvol := range vol.Subvols {
++		numBricks += len(subvol.Bricks)
++	}
+ 
+-	switch vol.Type {
+-	case api.Replicate:
+-	case api.DistReplicate:
+-		if vol.ArbiterCount == 1 {
+-			fmt.Printf("Number of Bricks: %d x (%d + %d) = %d\n", DistCount, RepCount-1, ArbCount, len(vol.Bricks))
++	if DistCount > 1 && vol.Subvols[0].Type == api.SubvolReplicate {
++		if ArbCount == 1 {
++			fmt.Printf("Number of Bricks: %d x (%d + %d) = %d\n", DistCount, RepCount-1, ArbCount, numBricks)
+ 		} else {
+-			fmt.Printf("Number of Bricks: %d x %d = %d\n", DistCount, RepCount, len(vol.Bricks))
++			fmt.Printf("Number of Bricks: %d x %d = %d\n", DistCount, RepCount, numBricks)
+ 		}
+-	default:
+-		fmt.Println("Number of Bricks:", len(vol.Bricks))
+-
++	} else {
++		fmt.Println("Number of Bricks:", numBricks)
+ 	}
+ }
+ 
+@@ -291,11 +334,13 @@ func volumeInfoDisplay(vol api.VolumeGetResp) {
+ 	fmt.Println("State:", vol.State)
+ 	fmt.Println("Transport-type:", vol.Transport)
+ 	volumeInfoDisplayNumbricks(vol)
+-	for i, brick := range vol.Bricks {
+-		if vol.ArbiterCount == 1 && (i+1)%vol.ReplicaCount == 0 {
+-			fmt.Printf("Brick%d: %s:%s (arbiter)\n", i+1, brick.NodeID, brick.Path)
+-		} else {
+-			fmt.Printf("Brick%d: %s:%s\n", i+1, brick.NodeID, brick.Path)
++	for sIdx, subvol := range vol.Subvols {
++		for bIdx, brick := range subvol.Bricks {
++			if brick.Type == api.Arbiter {
++				fmt.Printf("Brick%d: %s:%s (arbiter)\n", sIdx+bIdx+1, brick.NodeID, brick.Path)
++			} else {
++				fmt.Printf("Brick%d: %s:%s\n", sIdx+bIdx+1, brick.NodeID, brick.Path)
++			}
+ 		}
+ 	}
+ 	return
+diff --git a/glusterd2/brick/types.go b/glusterd2/brick/types.go
+index fc9f89b..30841d8 100644
+--- a/glusterd2/brick/types.go
++++ b/glusterd2/brick/types.go
+@@ -4,6 +4,17 @@ import (
+ 	"github.com/pborman/uuid"
+ )
+ 
++// Type is the type of Brick
++//go:generate stringer -type=Type
++type Type uint16
++
++const (
++	// Brick represents default type of brick
++	Brick Type = iota
++	// Arbiter represents Arbiter brick type
++	Arbiter
++)
++
+ // Brickinfo is the static information about the brick
+ type Brickinfo struct {
+ 	ID         uuid.UUID
+@@ -12,6 +23,7 @@ type Brickinfo struct {
+ 	Path       string
+ 	VolumeName string
+ 	VolumeID   uuid.UUID
++	Type       Type
+ }
+ 
+ func (b *Brickinfo) String() string {
+diff --git a/glusterd2/commands/peers/deletepeer.go b/glusterd2/commands/peers/deletepeer.go
+index 5c05abf..8b77c00 100644
+--- a/glusterd2/commands/peers/deletepeer.go
++++ b/glusterd2/commands/peers/deletepeer.go
+@@ -119,9 +119,11 @@ func bricksExist(id string) (bool, error) {
+ 	}
+ 
+ 	for _, v := range vols {
+-		for _, b := range v.Bricks {
+-			if uuid.Equal(pid, b.NodeID) {
+-				return true, nil
++		for _, subvol := range v.Subvols {
++			for _, b := range subvol.Bricks {
++				if uuid.Equal(pid, b.NodeID) {
++					return true, nil
++				}
+ 			}
+ 		}
+ 	}
+diff --git a/glusterd2/commands/volumes/commands.go b/glusterd2/commands/volumes/commands.go
+index cc47f0a..3708104 100644
+--- a/glusterd2/commands/volumes/commands.go
++++ b/glusterd2/commands/volumes/commands.go
+@@ -68,6 +68,18 @@ func (c *Command) Routes() route.Routes {
+ 			Pattern:     "/volumes/{volname}/stop",
+ 			Version:     1,
+ 			HandlerFunc: volumeStopHandler},
++		route.Route{
++			Name:        "VolfilesGenerate",
++			Method:      "POST",
++			Pattern:     "/volfiles",
++			Version:     1,
++			HandlerFunc: volfilesGenerateHandler},
++		route.Route{
++			Name:        "VolfilesGet",
++			Method:      "GET",
++			Pattern:     "/volfiles",
++			Version:     1,
++			HandlerFunc: volfilesListHandler},
+ 	}
+ }
+ 
+diff --git a/glusterd2/commands/volumes/common.go b/glusterd2/commands/volumes/common.go
+index 0254010..fc50974 100644
+--- a/glusterd2/commands/volumes/common.go
++++ b/glusterd2/commands/volumes/common.go
+@@ -1,17 +1,11 @@
+ package volumecommands
+ 
+ import (
+-	"os"
+-
+-	"github.com/gluster/glusterd2/glusterd2/gdctx"
+ 	"github.com/gluster/glusterd2/glusterd2/servers/sunrpc"
+ 	"github.com/gluster/glusterd2/glusterd2/transaction"
+-	"github.com/gluster/glusterd2/glusterd2/volgen"
++	volgen "github.com/gluster/glusterd2/glusterd2/volgen2"
+ 	"github.com/gluster/glusterd2/glusterd2/volume"
+ 	"github.com/gluster/glusterd2/glusterd2/xlator"
+-	"github.com/gluster/glusterd2/pkg/utils"
+-
+-	"github.com/pborman/uuid"
+ )
+ 
+ // validateOptions validates if the options and their values are valid and can
+@@ -33,37 +27,6 @@ func validateOptions(opts map[string]string) error {
+ 	return nil
+ }
+ 
+-func generateBrickVolfiles(c transaction.TxnCtx) error {
+-
+-	// This is used in volume-create and volume-set
+-
+-	var volinfo volume.Volinfo
+-	if err := c.Get("volinfo", &volinfo); err != nil {
+-		return err
+-	}
+-
+-	// Create 'vols' directory.
+-	err := os.MkdirAll(utils.GetVolumeDir(volinfo.Name), os.ModeDir|os.ModePerm)
+-	if err != nil {
+-		c.Logger().WithError(err).WithField(
+-			"volume", volinfo.Name).Debug("generateBrickVolfiles: failed to create vol directory")
+-		return err
+-	}
+-
+-	for _, b := range volinfo.Bricks {
+-		if !uuid.Equal(b.NodeID, gdctx.MyUUID) {
+-			continue
+-		}
+-		if err := volgen.GenerateBrickVolfile(&volinfo, &b); err != nil {
+-			c.Logger().WithError(err).WithField(
+-				"brick", b.Path).Debug("generateBrickVolfiles: failed to create brick volfile")
+-			return err
+-		}
+-	}
+-
+-	return nil
+-}
+-
+ func notifyVolfileChange(c transaction.TxnCtx) error {
+ 
+ 	var volinfo volume.Volinfo
+@@ -87,15 +50,15 @@ func storeVolume(c transaction.TxnCtx) error {
+ 		return err
+ 	}
+ 
+-	if err := volgen.GenerateClientVolfile(&volinfo); err != nil {
++	if err := volume.AddOrUpdateVolumeFunc(&volinfo); err != nil {
+ 		c.Logger().WithError(err).WithField(
+-			"volume", volinfo.Name).Debug("generateVolfiles: failed to create client volfile")
++			"volume", volinfo.Name).Debug("storeVolume: failed to store volume info")
+ 		return err
+ 	}
+ 
+-	if err := volume.AddOrUpdateVolumeFunc(&volinfo); err != nil {
++	if err := volgen.Generate(); err != nil {
+ 		c.Logger().WithError(err).WithField(
+-			"volume", volinfo.Name).Debug("storeVolume: failed to store volume info")
++			"volume", volinfo.Name).Debug("generateVolfiles: failed to generate volfiles")
+ 		return err
+ 	}
+ 
+diff --git a/glusterd2/commands/volumes/utils.go b/glusterd2/commands/volumes/utils.go
+index 5507f3a..703f36e 100644
+--- a/glusterd2/commands/volumes/utils.go
++++ b/glusterd2/commands/volumes/utils.go
+@@ -14,26 +14,38 @@ func createBrickInfo(b *brick.Brickinfo) api.BrickInfo {
+ 		VolumeName: b.VolumeName,
+ 		NodeID:     b.NodeID,
+ 		Hostname:   b.Hostname,
++		Type:       api.BrickType(b.Type),
+ 	}
+ }
+ 
+-func createVolumeInfoResp(v *volume.Volinfo) *api.VolumeInfo {
++func createSubvolInfo(sv *[]volume.Subvol) []api.Subvol {
++	var subvols []api.Subvol
++
++	for _, subvol := range *sv {
++		var blist []api.BrickInfo
++		for _, b := range subvol.Bricks {
++			blist = append(blist, createBrickInfo(&b))
++		}
+ 
+-	blist := make([]api.BrickInfo, len(v.Bricks))
+-	for i, b := range v.Bricks {
+-		blist[i] = createBrickInfo(&b)
++		subvols = append(subvols, api.Subvol{
++			Name:   subvol.Name,
++			Type:   api.SubvolType(subvol.Type),
++			Bricks: blist,
++		})
+ 	}
++	return subvols
++}
++
++func createVolumeInfoResp(v *volume.Volinfo) *api.VolumeInfo {
+ 
+ 	return &api.VolumeInfo{
+-		ID:           v.ID,
+-		Name:         v.Name,
+-		Type:         api.VolType(v.Type),
+-		Transport:    v.Transport,
+-		DistCount:    v.DistCount,
+-		ReplicaCount: v.ReplicaCount,
+-		ArbiterCount: v.ArbiterCount,
+-		State:        api.VolState(v.State),
+-		Options:      v.Options,
+-		Bricks:       blist,
++		ID:        v.ID,
++		Name:      v.Name,
++		Type:      api.VolType(v.Type),
++		Transport: v.Transport,
++		DistCount: v.DistCount,
++		State:     api.VolState(v.State),
++		Options:   v.Options,
++		Subvols:   createSubvolInfo(&v.Subvols),
+ 	}
+ }
+diff --git a/glusterd2/commands/volumes/volfiles.go b/glusterd2/commands/volumes/volfiles.go
+new file mode 100644
+index 0000000..3971bba
+--- /dev/null
++++ b/glusterd2/commands/volumes/volfiles.go
+@@ -0,0 +1,36 @@
++package volumecommands
++
++import (
++	"net/http"
++
++	restutils "github.com/gluster/glusterd2/glusterd2/servers/rest/utils"
++	volgen "github.com/gluster/glusterd2/glusterd2/volgen2"
++	"github.com/gluster/glusterd2/pkg/api"
++)
++
++func volfilesGenerateHandler(w http.ResponseWriter, r *http.Request) {
++	ctx := r.Context()
++
++	err := volgen.Generate()
++	if err != nil {
++		restutils.SendHTTPError(ctx, w, http.StatusInternalServerError, "unable to generate volfiles", api.ErrCodeDefault)
++		return
++	}
++	volfiles, err := volgen.GetVolfiles()
++	if err != nil {
++		restutils.SendHTTPError(ctx, w, http.StatusInternalServerError, "unable to get list of volfiles", api.ErrCodeDefault)
++		return
++	}
++	restutils.SendHTTPResponse(ctx, w, http.StatusOK, volfiles)
++}
++
++func volfilesListHandler(w http.ResponseWriter, r *http.Request) {
++	ctx := r.Context()
++
++	volfiles, err := volgen.GetVolfiles()
++	if err != nil {
++		restutils.SendHTTPError(ctx, w, http.StatusInternalServerError, "unable to get list of volfiles", api.ErrCodeDefault)
++		return
++	}
++	restutils.SendHTTPResponse(ctx, w, http.StatusOK, volfiles)
++}
+diff --git a/glusterd2/commands/volumes/volume-create.go b/glusterd2/commands/volumes/volume-create.go
+index b519782..efb97f9 100644
+--- a/glusterd2/commands/volumes/volume-create.go
++++ b/glusterd2/commands/volumes/volume-create.go
+@@ -5,11 +5,11 @@ import (
+ 	"fmt"
+ 	"net/http"
+ 
++	"github.com/gluster/glusterd2/glusterd2/brick"
+ 	"github.com/gluster/glusterd2/glusterd2/events"
+ 	"github.com/gluster/glusterd2/glusterd2/gdctx"
+ 	restutils "github.com/gluster/glusterd2/glusterd2/servers/rest/utils"
+ 	"github.com/gluster/glusterd2/glusterd2/transaction"
+-	"github.com/gluster/glusterd2/glusterd2/volgen"
+ 	"github.com/gluster/glusterd2/glusterd2/volume"
+ 	"github.com/gluster/glusterd2/pkg/api"
+ 	gderrors "github.com/gluster/glusterd2/pkg/errors"
+@@ -25,13 +25,37 @@ func unmarshalVolCreateRequest(msg *api.VolCreateReq, r *http.Request) (int, err
+ 	if msg.Name == "" {
+ 		return http.StatusBadRequest, gderrors.ErrEmptyVolName
+ 	}
+-	if len(msg.Bricks) <= 0 {
++
++	if len(msg.Subvols) <= 0 {
+ 		return http.StatusBadRequest, gderrors.ErrEmptyBrickList
+ 	}
++
++	for _, subvol := range msg.Subvols {
++		if len(subvol.Bricks) <= 0 {
++			return http.StatusBadRequest, gderrors.ErrEmptyBrickList
++		}
++	}
+ 	return 0, nil
+ 
+ }
+ 
++func voltypeFromSubvols(req *api.VolCreateReq) volume.VolType {
++	if len(req.Subvols) == 0 {
++		return volume.Distribute
++	}
++	// TODO: Don't know how to decide on Volume Type if each subvol is different
++	// For now just picking the first subvols Type, which satisfies
++	// most of today's needs
++	switch req.Subvols[0].Type {
++	case "replicate":
++		return volume.Replicate
++	case "distribute":
++		return volume.Distribute
++	default:
++		return volume.Distribute
++	}
++}
++
+ func createVolinfo(req *api.VolCreateReq) (*volume.Volinfo, error) {
+ 
+ 	var err error
+@@ -51,39 +75,56 @@ func createVolinfo(req *api.VolCreateReq) (*volume.Volinfo, error) {
+ 		v.Transport = "tcp"
+ 	}
+ 
+-	if req.Replica == 0 {
+-		v.ReplicaCount = 1
+-	} else {
+-		v.ReplicaCount = req.Replica
+-	}
++	v.DistCount = len(req.Subvols)
++
++	v.Type = voltypeFromSubvols(req)
+ 
+-	if req.Arbiter != 0 {
+-		if req.Replica != 3 || req.Arbiter != 1 {
+-			return nil, errors.New("For arbiter configuration, replica count must be 3 and arbiter count must be 1. The 3rd brick of the replica will be the arbiter")
++	for idx, subvolreq := range req.Subvols {
++		if subvolreq.ReplicaCount == 0 && subvolreq.Type == "replicate" {
++			return nil, errors.New("Replica count not specified")
+ 		}
+-		v.ArbiterCount = 1
+-	}
+ 
+-	if (len(req.Bricks) % v.ReplicaCount) != 0 {
+-		return nil, errors.New("Invalid number of bricks")
+-	}
++		if subvolreq.ReplicaCount > 0 && subvolreq.ReplicaCount != len(subvolreq.Bricks) {
++			return nil, errors.New("Invalid number of bricks")
++		}
+ 
+-	v.DistCount = len(req.Bricks) / v.ReplicaCount
++		name := subvolreq.Name
++		if name == "" {
++			name = fmt.Sprintf("s-%d", idx)
++		}
+ 
+-	switch len(req.Bricks) {
+-	case 1:
+-		fallthrough
+-	case v.DistCount:
+-		v.Type = volume.Distribute
+-	case v.ReplicaCount:
+-		v.Type = volume.Replicate
+-	default:
+-		v.Type = volume.DistReplicate
+-	}
++		ty := volume.SubvolDistribute
++		switch subvolreq.Type {
++		case "replicate":
++			ty = volume.SubvolReplicate
++		case "disperse":
++			ty = volume.SubvolDisperse
++		default:
++			ty = volume.SubvolDistribute
++		}
+ 
+-	v.Bricks, err = volume.NewBrickEntriesFunc(req.Bricks, v.Name, v.ID)
+-	if err != nil {
+-		return nil, err
++		s := volume.Subvol{
++			Name: name,
++			Type: ty,
++		}
++
++		if subvolreq.ArbiterCount != 0 {
++			if subvolreq.ReplicaCount != 3 || subvolreq.ArbiterCount != 1 {
++				return nil, errors.New("For arbiter configuration, replica count must be 3 and arbiter count must be 1. The 3rd brick of the replica will be the arbiter")
++			}
++			s.ArbiterCount = 1
++		}
++
++		if subvolreq.ReplicaCount == 0 {
++			s.ReplicaCount = 1
++		} else {
++			s.ReplicaCount = subvolreq.ReplicaCount
++		}
++		s.Bricks, err = volume.NewBrickEntriesFunc(subvolreq.Bricks, v.Name, v.ID)
++		if err != nil {
++			return nil, err
++		}
++		v.Subvols = append(v.Subvols, s)
+ 	}
+ 
+ 	v.Auth = volume.VolAuth{
+@@ -110,8 +151,15 @@ func validateVolumeCreate(c transaction.TxnCtx) error {
+ 		return err
+ 	}
+ 
++	var bricks []brick.Brickinfo
++	for _, subvol := range volinfo.Subvols {
++		for _, brick := range subvol.Bricks {
++			bricks = append(bricks, brick)
++		}
++	}
++
+ 	// FIXME: Return values of this function are inconsistent and unused
+-	if _, err = volume.ValidateBrickEntriesFunc(volinfo.Bricks, volinfo.ID, req.Force); err != nil {
++	if _, err = volume.ValidateBrickEntriesFunc(bricks, volinfo.ID, req.Force); err != nil {
+ 		c.Logger().WithError(err).WithField(
+ 			"volume", volinfo.Name).Debug("validateVolumeCreate: failed to validate bricks")
+ 		return err
+@@ -127,15 +175,16 @@ func rollBackVolumeCreate(c transaction.TxnCtx) error {
+ 		return err
+ 	}
+ 
+-	for _, b := range volinfo.Bricks {
+-		if !uuid.Equal(b.NodeID, gdctx.MyUUID) {
+-			continue
++	for _, subvol := range volinfo.Subvols {
++		for _, b := range subvol.Bricks {
++			if !uuid.Equal(b.NodeID, gdctx.MyUUID) {
++				continue
++			}
++
++			// TODO: Clean xattrs set if any. ValidateBrickEntriesFunc()
++			// does a lot of things that it's not supposed to do.
+ 		}
+-		volgen.DeleteBrickVolfile(&b)
+-		// TODO: Clean xattrs set if any. ValidateBrickEntriesFunc()
+-		// does a lot of things that it's not supposed to do.
+ 	}
+-
+ 	return nil
+ }
+ 
+@@ -145,7 +194,6 @@ func registerVolCreateStepFuncs() {
+ 		sf   transaction.StepFunc
+ 	}{
+ 		{"vol-create.Validate", validateVolumeCreate},
+-		{"vol-create.GenerateBrickVolfiles", generateBrickVolfiles},
+ 		{"vol-create.StoreVolume", storeVolume},
+ 		{"vol-create.Rollback", rollBackVolumeCreate},
+ 	}
+@@ -172,11 +220,15 @@ func volumeCreateHandler(w http.ResponseWriter, r *http.Request) {
+ 		return
+ 	}
+ 
+-	nodes, err := nodesFromBricks(req.Bricks)
+-	if err != nil {
+-		logger.WithError(err).Error("could not prepare node list")
+-		restutils.SendHTTPError(ctx, w, http.StatusInternalServerError, err.Error(), api.ErrCodeDefault)
+-		return
++	var nodesMap = make(map[string]int)
++	var nodes []uuid.UUID
++	for _, subvol := range req.Subvols {
++		for _, brick := range subvol.Bricks {
++			if _, ok := nodesMap[brick.NodeID]; !ok {
++				nodesMap[brick.NodeID] = 1
++				nodes = append(nodes, uuid.Parse(brick.NodeID))
++			}
++		}
+ 	}
+ 
+ 	if err := validateOptions(req.Options); err != nil {
+@@ -202,11 +254,6 @@ func volumeCreateHandler(w http.ResponseWriter, r *http.Request) {
+ 			Nodes:  nodes,
+ 		},
+ 		{
+-			DoFunc:   "vol-create.GenerateBrickVolfiles",
+-			UndoFunc: "vol-create.Rollback",
+-			Nodes:    nodes,
+-		},
+-		{
+ 			DoFunc: "vol-create.StoreVolume",
+ 			Nodes:  []uuid.UUID{gdctx.MyUUID},
+ 		},
+diff --git a/glusterd2/commands/volumes/volume-create_test.go b/glusterd2/commands/volumes/volume-create_test.go
+index c656204..d8ce124 100644
+--- a/glusterd2/commands/volumes/volume-create_test.go
++++ b/glusterd2/commands/volumes/volume-create_test.go
+@@ -45,7 +45,7 @@ func TestUnmarshalVolCreateRequest(t *testing.T) {
+ 	assert.Equal(t, gderrors.ErrEmptyBrickList, e)
+ 
+ 	// Request with volume name & bricks
+-	r, _ = http.NewRequest("POST", "/v1/volumes/", bytes.NewBuffer([]byte(`{"name" : "vol", "bricks":["127.0.0.1:/tmp/b1"]}`)))
++	r, _ = http.NewRequest("POST", "/v1/volumes/", bytes.NewBuffer([]byte(`{"name" : "vol", "subvols": [{"bricks":[{"nodeid": "127.0.0.1", "path": "/tmp/b1"}]}]}`)))
+ 	_, e = unmarshalVolCreateRequest(msg, r)
+ 	assert.Nil(t, e)
+ 
+@@ -59,13 +59,16 @@ func TestCreateVolinfo(t *testing.T) {
+ 	msg := new(api.VolCreateReq)
+ 	u := uuid.NewRandom()
+ 	msg.Name = "vol"
+-	msg.Bricks = []string{u.String() + ":/tmp/b1", u.String() + ":/tmp/b2"}
++	msg.Subvols = []api.SubvolReq{{Bricks: []api.BrickReq{
++		{NodeID: u.String(), Path: "/tmp/b1"},
++		{NodeID: u.String(), Path: "/tmp/b2"},
++	}}}
+ 	vol, e := createVolinfo(msg)
+ 	assert.Nil(t, e)
+ 	assert.NotNil(t, vol)
+ 
+ 	// Mock failure in NewBrickEntries(), createVolume() should fail
+-	defer testutils.Patch(&volume.NewBrickEntriesFunc, func(bricks []string, volName string, volID uuid.UUID) ([]brick.Brickinfo, error) {
++	defer testutils.Patch(&volume.NewBrickEntriesFunc, func(bricks []api.BrickReq, volName string, volID uuid.UUID) ([]brick.Brickinfo, error) {
+ 		return nil, errBad
+ 	}).Restore()
+ 	_, e = createVolinfo(msg)
+@@ -78,7 +81,10 @@ func TestValidateVolumeCreate(t *testing.T) {
+ 
+ 	msg.Name = "vol"
+ 	u := uuid.NewRandom()
+-	msg.Bricks = []string{u.String() + ":/tmp/b1", u.String() + ":/tmp/b2"}
++	msg.Subvols = []api.SubvolReq{{Bricks: []api.BrickReq{
++		{NodeID: u.String(), Path: "/tmp/b1"},
++		{NodeID: u.String(), Path: "/tmp/b2"},
++	}}}
+ 
+ 	c := transaction.NewMockCtx()
+ 	c.Set("req", msg)
+diff --git a/glusterd2/commands/volumes/volume-delete.go b/glusterd2/commands/volumes/volume-delete.go
+index acf7d19..cd94299 100644
+--- a/glusterd2/commands/volumes/volume-delete.go
++++ b/glusterd2/commands/volumes/volume-delete.go
+@@ -28,20 +28,22 @@ func deleteVolfiles(c transaction.TxnCtx) error {
+ 	}
+ 
+ 	if err := volgen.DeleteClientVolfile(volinfo); err != nil {
++		// Log and continue, ignore the cleanup error
+ 		c.Logger().WithError(err).WithField(
+-			"volume", volinfo.Name).Debug("deleteVolfiles: failed to delete client volfile")
+-		return err
++			"volume", volinfo.Name).Warn("deleteVolfiles: failed to delete client volfile")
+ 	}
+ 
+-	for _, b := range volinfo.Bricks {
+-		if !uuid.Equal(b.NodeID, gdctx.MyUUID) {
+-			continue
+-		}
+-
+-		if err := volgen.DeleteBrickVolfile(&b); err != nil {
+-			c.Logger().WithError(err).WithField(
+-				"brick", b.Path).Debug("deleteVolfiles: failed to delete brick volfile")
+-			return err
++	for _, subvol := range volinfo.Subvols {
++		for _, b := range subvol.Bricks {
++			if !uuid.Equal(b.NodeID, gdctx.MyUUID) {
++				continue
++			}
++
++			if err := volgen.DeleteBrickVolfile(&b); err != nil {
++				// Log and continue, ignore the volfile cleanup error
++				c.Logger().WithError(err).WithField(
++					"brick", b.Path).Warn("deleteVolfiles: failed to delete brick volfile")
++			}
+ 		}
+ 	}
+ 
+diff --git a/glusterd2/commands/volumes/volume-expand.go b/glusterd2/commands/volumes/volume-expand.go
+index 9b1d5f5..d5d3dc9 100644
+--- a/glusterd2/commands/volumes/volume-expand.go
++++ b/glusterd2/commands/volumes/volume-expand.go
+@@ -7,7 +7,6 @@ import (
+ 	"github.com/gluster/glusterd2/glusterd2/gdctx"
+ 	restutils "github.com/gluster/glusterd2/glusterd2/servers/rest/utils"
+ 	"github.com/gluster/glusterd2/glusterd2/transaction"
+-	"github.com/gluster/glusterd2/glusterd2/volgen"
+ 	"github.com/gluster/glusterd2/glusterd2/volume"
+ 	"github.com/gluster/glusterd2/pkg/api"
+ 	"github.com/gluster/glusterd2/pkg/errors"
+@@ -44,18 +43,6 @@ func startBricksOnExpand(c transaction.TxnCtx) error {
+ 		return err
+ 	}
+ 
+-	// Generate brick volfiles for the new bricks
+-	for _, b := range newBricks {
+-		if !uuid.Equal(b.NodeID, gdctx.MyUUID) {
+-			continue
+-		}
+-		if err := volgen.GenerateBrickVolfile(&volinfo, &b); err != nil {
+-			c.Logger().WithError(err).WithField(
+-				"brick", b.Path).Debug("GenerateBrickVolfile: failed to create brick volfile")
+-			return err
+-		}
+-	}
+-
+ 	if volinfo.State != volume.VolStarted {
+ 		return nil
+ 	}
+@@ -109,13 +96,6 @@ func undoStartBricksOnExpand(c transaction.TxnCtx) error {
+ 			// so stopping brick might fail, but log anyway
+ 		}
+ 
+-		if err := volgen.DeleteBrickVolfile(&b); err != nil {
+-			c.Logger().WithFields(log.Fields{
+-				"error":  err,
+-				"volume": b.VolumeName,
+-				"brick":  b.String(),
+-			}).Debug("failed to remove brick volfile")
+-		}
+ 	}
+ 
+ 	return nil
+@@ -138,19 +118,29 @@ func updateVolinfoOnExpand(c transaction.TxnCtx) error {
+ 		return err
+ 	}
+ 
+-	volinfo.ReplicaCount = newReplicaCount
+-	volinfo.Bricks = append(volinfo.Bricks, newBricks...)
+-	volinfo.DistCount = len(volinfo.Bricks) / volinfo.ReplicaCount
+-
+-	switch len(volinfo.Bricks) {
+-	case volinfo.DistCount:
+-		volinfo.Type = volume.Distribute
+-	case volinfo.ReplicaCount:
+-		volinfo.Type = volume.Replicate
+-	default:
+-		volinfo.Type = volume.DistReplicate
++	// Update all Subvols Replica count
++	for idx := range volinfo.Subvols {
++		volinfo.Subvols[idx].ReplicaCount = newReplicaCount
+ 	}
+ 
++	// TODO: Assumption, all subvols are same
++	// If New Replica count is different than existing then add one brick to each subvolume
++	if newReplicaCount != volinfo.Subvols[0].ReplicaCount {
++		for idx, b := range newBricks {
++			volinfo.Subvols[idx].Bricks = append(volinfo.Subvols[idx].Bricks, b)
++		}
++	} else {
++		// Create new Sub volumes with given bricks
++		for i := 0; i < len(newBricks)/newReplicaCount; i++ {
++			idx := i * newReplicaCount
++			volinfo.Subvols = append(volinfo.Subvols, volume.Subvol{
++				Type:   volinfo.Subvols[0].Type,
++				Bricks: newBricks[idx : idx+newReplicaCount],
++			})
++		}
++	}
++	volinfo.DistCount = len(volinfo.Subvols)
++
+ 	// update new volinfo in txn ctx
+ 	if err := c.Set("volinfo", volinfo); err != nil {
+ 		return err
+@@ -196,13 +186,17 @@ func volumeExpandHandler(w http.ResponseWriter, r *http.Request) {
+ 		return
+ 	}
+ 
+-	newBrickCount := len(req.Bricks) + len(volinfo.Bricks)
++	numBricks := 0
++	for _, subvol := range volinfo.Subvols {
++		numBricks += len(subvol.Bricks)
++	}
++	newBrickCount := len(req.Bricks) + numBricks
+ 
+ 	var newReplicaCount int
+ 	if req.ReplicaCount != 0 {
+ 		newReplicaCount = req.ReplicaCount
+ 	} else {
+-		newReplicaCount = volinfo.ReplicaCount
++		newReplicaCount = volinfo.Subvols[0].ReplicaCount
+ 	}
+ 
+ 	if newBrickCount%newReplicaCount != 0 {
+@@ -211,10 +205,11 @@ func volumeExpandHandler(w http.ResponseWriter, r *http.Request) {
+ 	}
+ 
+ 	if volinfo.Type == volume.Replicate && req.ReplicaCount != 0 {
+-		if req.ReplicaCount < volinfo.ReplicaCount {
++		// TODO: Only considered first sub volume's ReplicaCount
++		if req.ReplicaCount < volinfo.Subvols[0].ReplicaCount {
+ 			restutils.SendHTTPError(ctx, w, http.StatusUnprocessableEntity, "Invalid number of bricks", api.ErrCodeDefault)
+ 			return
+-		} else if req.ReplicaCount == volinfo.ReplicaCount {
++		} else if req.ReplicaCount == volinfo.Subvols[0].ReplicaCount {
+ 			restutils.SendHTTPError(ctx, w, http.StatusUnprocessableEntity, "Replica count is same", api.ErrCodeDefault)
+ 			return
+ 		}
+@@ -229,11 +224,13 @@ func volumeExpandHandler(w http.ResponseWriter, r *http.Request) {
+ 	txn := transaction.NewTxn(ctx)
+ 	defer txn.Cleanup()
+ 
+-	nodes, err := nodesFromBricks(req.Bricks)
+-	if err != nil {
+-		logger.WithError(err).Error("could not prepare node list")
+-		restutils.SendHTTPError(ctx, w, http.StatusInternalServerError, err.Error(), api.ErrCodeDefault)
+-		return
++	var nodesMap = make(map[string]int)
++	var nodes []uuid.UUID
++	for _, brick := range req.Bricks {
++		if _, ok := nodesMap[brick.NodeID]; !ok {
++			nodesMap[brick.NodeID] = 1
++			nodes = append(nodes, uuid.Parse(brick.NodeID))
++		}
+ 	}
+ 
+ 	txn.Steps = []*transaction.Step{
+@@ -243,15 +240,15 @@ func volumeExpandHandler(w http.ResponseWriter, r *http.Request) {
+ 			Nodes:  nodes,
+ 		},
+ 		{
++			DoFunc: "vol-expand.UpdateVolinfo",
++			Nodes:  []uuid.UUID{gdctx.MyUUID},
++		},
++		{
+ 			DoFunc:   "vol-expand.StartBrick",
+ 			Nodes:    nodes,
+ 			UndoFunc: "vol-expand.UndoStartBrick",
+ 		},
+ 		{
+-			DoFunc: "vol-expand.UpdateVolinfo",
+-			Nodes:  []uuid.UUID{gdctx.MyUUID},
+-		},
+-		{
+ 			DoFunc: "vol-expand.NotifyClients",
+ 			Nodes:  nodes,
+ 		},
+diff --git a/glusterd2/commands/volumes/volume-option.go b/glusterd2/commands/volumes/volume-option.go
+index 1bd4cb7..9c52366 100644
+--- a/glusterd2/commands/volumes/volume-option.go
++++ b/glusterd2/commands/volumes/volume-option.go
+@@ -22,7 +22,6 @@ func registerVolOptionStepFuncs() {
+ 		sf   transaction.StepFunc
+ 	}{
+ 		{"vol-option.UpdateVolinfo", storeVolume},
+-		{"vol-option.RegenerateVolfiles", generateBrickVolfiles},
+ 		{"vol-option.NotifyVolfileChange", notifyVolfileChange},
+ 	}
+ 	for _, sf := range sfs {
+@@ -76,10 +75,6 @@ func volumeOptionsHandler(w http.ResponseWriter, r *http.Request) {
+ 			Nodes:  []uuid.UUID{gdctx.MyUUID},
+ 		},
+ 		{
+-			DoFunc: "vol-option.RegenerateVolfiles",
+-			Nodes:  volinfo.Nodes(),
+-		},
+-		{
+ 			DoFunc: "vol-option.NotifyVolfileChange",
+ 			Nodes:  allNodes,
+ 		},
+diff --git a/glusterd2/commands/volumes/volume-start.go b/glusterd2/commands/volumes/volume-start.go
+index d445769..846f9f3 100644
+--- a/glusterd2/commands/volumes/volume-start.go
++++ b/glusterd2/commands/volumes/volume-start.go
+@@ -27,19 +27,21 @@ func startAllBricks(c transaction.TxnCtx) error {
+ 		return err
+ 	}
+ 
+-	for _, b := range volinfo.Bricks {
++	for _, subvol := range volinfo.Subvols {
++		for _, b := range subvol.Bricks {
+ 
+-		if !uuid.Equal(b.NodeID, gdctx.MyUUID) {
+-			continue
+-		}
++			if !uuid.Equal(b.NodeID, gdctx.MyUUID) {
++				continue
++			}
+ 
+-		c.Logger().WithFields(log.Fields{
+-			"volume": b.VolumeName,
+-			"brick":  b.String(),
+-		}).Info("Starting brick")
++			c.Logger().WithFields(log.Fields{
++				"volume": b.VolumeName,
++				"brick":  b.String(),
++			}).Info("Starting brick")
+ 
+-		if err := startBrick(b); err != nil {
+-			return err
++			if err := startBrick(b); err != nil {
++				return err
++			}
+ 		}
+ 	}
+ 
+@@ -66,19 +68,21 @@ func stopAllBricks(c transaction.TxnCtx) error {
+ 		return e
+ 	}
+ 
+-	for _, b := range vol.Bricks {
++	for _, subvol := range vol.Subvols {
++		for _, b := range subvol.Bricks {
+ 
+-		if !uuid.Equal(b.NodeID, gdctx.MyUUID) {
+-			continue
+-		}
++			if !uuid.Equal(b.NodeID, gdctx.MyUUID) {
++				continue
++			}
+ 
+-		c.Logger().WithFields(log.Fields{
+-			"volume": b.VolumeName,
+-			"brick":  b.String(),
+-		}).Info("volume start failed, stopping brick")
++			c.Logger().WithFields(log.Fields{
++				"volume": b.VolumeName,
++				"brick":  b.String(),
++			}).Info("volume start failed, stopping brick")
+ 
+-		if err := stopBrick(b); err != nil {
+-			return err
++			if err := stopBrick(b); err != nil {
++				return err
++			}
+ 		}
+ 	}
+ 
+diff --git a/glusterd2/commands/volumes/volume-status.go b/glusterd2/commands/volumes/volume-status.go
+index 7540e7d..1bd3820 100644
+--- a/glusterd2/commands/volumes/volume-status.go
++++ b/glusterd2/commands/volumes/volume-status.go
+@@ -52,38 +52,40 @@ func checkStatus(ctx transaction.TxnCtx) error {
+ 
+ 	var brickStatuses []*brickstatus
+ 
+-	for _, binfo := range vol.Bricks {
+-		// Skip bricks that aren't on this node.
+-		if uuid.Equal(binfo.NodeID, gdctx.MyUUID) == false {
+-			continue
+-		}
++	for _, subvol := range vol.Subvols {
++		for _, binfo := range subvol.Bricks {
++			// Skip bricks that aren't on this node.
++			if uuid.Equal(binfo.NodeID, gdctx.MyUUID) == false {
++				continue
++			}
+ 
+-		var port int
++			var port int
+ 
+-		brickDaemon, err := brick.NewGlusterfsd(binfo)
+-		if err != nil {
+-			return err
+-		}
++			brickDaemon, err := brick.NewGlusterfsd(binfo)
++			if err != nil {
++				return err
++			}
+ 
+-		online := false
++			online := false
+ 
+-		pid, err := daemon.ReadPidFromFile(brickDaemon.PidFile())
+-		if err == nil {
+-			// Check if process is running
+-			_, err := daemon.GetProcess(pid)
++			pid, err := daemon.ReadPidFromFile(brickDaemon.PidFile())
+ 			if err == nil {
+-				online = true
+-				port = pmap.RegistrySearch(binfo.Path, pmap.GfPmapPortBrickserver)
++				// Check if process is running
++				_, err := daemon.GetProcess(pid)
++				if err == nil {
++					online = true
++					port = pmap.RegistrySearch(binfo.Path, pmap.GfPmapPortBrickserver)
++				}
+ 			}
+-		}
+ 
+-		brickStatus := &brickstatus{
+-			Info:   binfo,
+-			Online: online,
+-			Pid:    pid,
+-			Port:   port,
++			brickStatus := &brickstatus{
++				Info:   binfo,
++				Online: online,
++				Pid:    pid,
++				Port:   port,
++			}
++			brickStatuses = append(brickStatuses, brickStatus)
+ 		}
+-		brickStatuses = append(brickStatuses, brickStatus)
+ 	}
+ 
+ 	// Store the results in transaction context. This will be consumed by
+@@ -150,9 +152,11 @@ func createVolumeStatusResp(ctx transaction.TxnCtx, vol *volume.Volinfo) (*api.V
+ 
+ 	bmap := make(map[string]*api.BrickStatus)
+ 
+-	for _, b := range vol.Bricks {
+-		bmap[b.ID.String()] = &api.BrickStatus{
+-			Info: createBrickInfo(&b),
++	for _, subvol := range vol.Subvols {
++		for _, b := range subvol.Bricks {
++			bmap[b.ID.String()] = &api.BrickStatus{
++				Info: createBrickInfo(&b),
++			}
+ 		}
+ 	}
+ 
+diff --git a/glusterd2/commands/volumes/volume-stop.go b/glusterd2/commands/volumes/volume-stop.go
+index de7f23f..667c7dc 100644
+--- a/glusterd2/commands/volumes/volume-stop.go
++++ b/glusterd2/commands/volumes/volume-stop.go
+@@ -34,48 +34,49 @@ func stopBricks(c transaction.TxnCtx) error {
+ 		return err
+ 	}
+ 
+-	for _, b := range vol.Bricks {
+-		if uuid.Equal(b.NodeID, gdctx.MyUUID) {
+-
+-			brickDaemon, err := brick.NewGlusterfsd(b)
+-			if err != nil {
+-				return err
+-			}
+-
+-			c.Logger().WithFields(log.Fields{
+-				"volume": volname, "brick": b.String()}).Info("Stopping brick")
+-
+-			client, err := daemon.GetRPCClient(brickDaemon)
+-			if err != nil {
+-				c.Logger().WithError(err).WithField(
+-					"brick", b.String()).Error("failed to connect to brick, sending SIGTERM")
+-				daemon.Stop(brickDaemon, false)
+-				continue
+-			}
+-
+-			req := &brick.GfBrickOpReq{
+-				Name: b.Path,
+-				Op:   brick.OpBrickTerminate,
+-			}
+-			var rsp brick.GfBrickOpRsp
+-			err = client.Call("BrickOp", req, &rsp)
+-			if err != nil || rsp.OpRet != 0 {
+-				c.Logger().WithError(err).WithField(
+-					"brick", b.String()).Error("failed to send terminate RPC, sending SIGTERM")
+-				daemon.Stop(brickDaemon, false)
+-				continue
+-			}
+-
+-			// On graceful shutdown of brick, daemon.Stop() isn't called.
+-			if err := daemon.DelDaemon(brickDaemon); err != nil {
+-				log.WithFields(log.Fields{
+-					"name": brickDaemon.Name(),
+-					"id":   brickDaemon.ID(),
+-				}).WithError(err).Warn("failed to delete brick entry from store, it may be restarted on GlusterD restart")
++	for _, subvol := range vol.Subvols {
++		for _, b := range subvol.Bricks {
++			if uuid.Equal(b.NodeID, gdctx.MyUUID) {
++
++				brickDaemon, err := brick.NewGlusterfsd(b)
++				if err != nil {
++					return err
++				}
++
++				c.Logger().WithFields(log.Fields{
++					"volume": volname, "brick": b.String()}).Info("Stopping brick")
++
++				client, err := daemon.GetRPCClient(brickDaemon)
++				if err != nil {
++					c.Logger().WithError(err).WithField(
++						"brick", b.String()).Error("failed to connect to brick, sending SIGTERM")
++					daemon.Stop(brickDaemon, false)
++					continue
++				}
++
++				req := &brick.GfBrickOpReq{
++					Name: b.Path,
++					Op:   brick.OpBrickTerminate,
++				}
++				var rsp brick.GfBrickOpRsp
++				err = client.Call("BrickOp", req, &rsp)
++				if err != nil || rsp.OpRet != 0 {
++					c.Logger().WithError(err).WithField(
++						"brick", b.String()).Error("failed to send terminate RPC, sending SIGTERM")
++					daemon.Stop(brickDaemon, false)
++					continue
++				}
++
++				// On graceful shutdown of brick, daemon.Stop() isn't called.
++				if err := daemon.DelDaemon(brickDaemon); err != nil {
++					log.WithFields(log.Fields{
++						"name": brickDaemon.Name(),
++						"id":   brickDaemon.ID(),
++					}).WithError(err).Warn("failed to delete brick entry from store, it may be restarted on GlusterD restart")
++				}
+ 			}
+ 		}
+ 	}
+-
+ 	return nil
+ }
+ 
+diff --git a/glusterd2/servers/sunrpc/handshake_prog.go b/glusterd2/servers/sunrpc/handshake_prog.go
+index 3857e53..871f3f8 100644
+--- a/glusterd2/servers/sunrpc/handshake_prog.go
++++ b/glusterd2/servers/sunrpc/handshake_prog.go
+@@ -2,13 +2,9 @@ package sunrpc
+ 
+ import (
+ 	"context"
+-	"fmt"
+-	"io/ioutil"
+-	"path"
+ 	"strings"
+ 
+ 	"github.com/gluster/glusterd2/glusterd2/store"
+-	"github.com/gluster/glusterd2/pkg/utils"
+ 
+ 	"github.com/prashanthpai/sunrpc"
+ 	log "github.com/sirupsen/logrus"
+@@ -84,40 +80,27 @@ type GfGetspecRsp struct {
+ func (p *GfHandshake) ServerGetspec(args *GfGetspecReq, reply *GfGetspecRsp) error {
+ 	var err error
+ 	var fileContents []byte
+-	var volFilePath string
+ 
+-	xdata, err := DictUnserialize(args.Xdata)
++	_, err = DictUnserialize(args.Xdata)
+ 	if err != nil {
+ 		log.WithError(err).Error("ServerGetspec(): DictUnserialize() failed")
++	}
++
++	// Get Volfile from store
++	volname := strings.TrimPrefix(args.Key, "/")
++	resp, err := store.Store.Get(context.TODO(), volfilePrefix+volname)
++	if err != nil {
++		log.WithField("volfile", args.Key).WithError(err).Error("ServerGetspec(): failed to retrive volfile from store")
+ 		goto Out
+ 	}
+ 
+-	if _, ok := xdata["brick_name"]; ok {
+-		// brick volfile
+-		s := strings.Split(args.Key, ".")
+-		volName := s[0]
+-		volFilePath = path.Join(utils.GetVolumeDir(volName), fmt.Sprintf("%s.vol", args.Key))
+-		fileContents, err = ioutil.ReadFile(volFilePath)
+-		if err != nil {
+-			log.WithError(err).Error("ServerGetspec(): Could not read brick volfile")
+-			goto Out
+-		}
+-	} else {
+-		// client volfile
+-		resp, err := store.Store.Get(context.TODO(), volfilePrefix+args.Key)
+-		if err != nil {
+-			log.WithError(err).Error("ServerGetspec(): failed to retrive client volfile from store")
+-			goto Out
+-		}
+-
+-		if resp.Count != 1 {
+-			log.WithField("volume", args.Key).Error("ServerGetspec(): client volfile not found in store")
+-			goto Out
+-		}
+-
+-		fileContents = resp.Kvs[0].Value
++	if resp.Count != 1 {
++		log.WithField("volfile", args.Key).Error("ServerGetspec(): volfile not found in store")
++		goto Out
+ 	}
+ 
++	fileContents = resp.Kvs[0].Value
++
+ 	reply.Spec = string(fileContents)
+ 	reply.OpRet = len(reply.Spec)
+ 	reply.OpErrno = 0
+diff --git a/glusterd2/volgen/cluster-graph.go b/glusterd2/volgen/cluster-graph.go
+index e514a67..6f91f1d 100644
+--- a/glusterd2/volgen/cluster-graph.go
++++ b/glusterd2/volgen/cluster-graph.go
+@@ -92,7 +92,7 @@ func getChildCount(t string, vol *volume.Volinfo) int {
+ 	case "cluster/afr":
+ 		fallthrough
+ 	case "cluster/replicate":
+-		return vol.ReplicaCount
++		return vol.Subvols[0].ReplicaCount
+ 	case "cluster/dht":
+ 		fallthrough
+ 	case "cluster/distribute":
+@@ -105,12 +105,14 @@ func getChildCount(t string, vol *volume.Volinfo) int {
+ func newClientNodes(vol *volume.Volinfo, graph string, extra map[string]string) ([]*Node, error) {
+ 	var ns []*Node
+ 
+-	for _, b := range vol.Bricks {
+-		n, err := newClientNode(vol, &b, graph, extra)
+-		if err != nil {
+-			return nil, err
++	for _, subvol := range vol.Subvols {
++		for _, b := range subvol.Bricks {
++			n, err := newClientNode(vol, &b, graph, extra)
++			if err != nil {
++				return nil, err
++			}
++			ns = append(ns, n)
+ 		}
+-		ns = append(ns, n)
+ 	}
+ 
+ 	return ns, nil
+diff --git a/glusterd2/volgen/volgen.go b/glusterd2/volgen/volgen.go
+index 3a59571..0acafd5 100644
+--- a/glusterd2/volgen/volgen.go
++++ b/glusterd2/volgen/volgen.go
+@@ -30,9 +30,11 @@ func Generate(vol *volume.Volinfo) error {
+ 		return err
+ 	}
+ 
+-	for _, b := range vol.Bricks {
+-		if err := GenerateBrickVolfile(vol, &b); err != nil {
+-			return err
++	for _, subvol := range vol.Subvols {
++		for _, b := range subvol.Bricks {
++			if err := GenerateBrickVolfile(vol, &b); err != nil {
++				return err
++			}
+ 		}
+ 	}
+ 
+diff --git a/glusterd2/volgen2/generate.go b/glusterd2/volgen2/generate.go
+new file mode 100644
+index 0000000..5c7b8bb
+--- /dev/null
++++ b/glusterd2/volgen2/generate.go
+@@ -0,0 +1,145 @@
++package volgen2
++
++import (
++	"github.com/gluster/glusterd2/glusterd2/volume"
++	"github.com/gluster/glusterd2/pkg/utils"
++
++	"github.com/pborman/uuid"
++)
++
++func nodesFromClusterInfo(clusterinfo []*volume.Volinfo) map[string]uuid.UUID {
++	set := make(map[string]uuid.UUID)
++	for _, vol := range clusterinfo {
++		for _, subvol := range vol.Subvols {
++			for _, brick := range subvol.Bricks {
++				if _, ok := set[brick.ID.String()]; !ok {
++					set[brick.ID.String()] = brick.ID
++				}
++			}
++		}
++	}
++	return set
++}
++
++type extrainfo struct {
++	StringMaps map[string]map[string]string
++	Options    map[string]string
++}
++
++// Generate generates all the volfiles(Cluster/Volume/Brick)
++func Generate() error {
++	clusterinfo, err := volume.GetVolumes()
++	if err != nil {
++		return err
++	}
++
++	var xopts = make(map[string]extrainfo)
++	for _, vol := range clusterinfo {
++		data := make(map[string]map[string]string)
++		data[vol.ID.String()] = vol.StringMap()
++		for _, subvol := range vol.Subvols {
++			for _, b := range subvol.Bricks {
++				data[vol.ID.String()+"."+b.ID.String()] = utils.MergeStringMaps(vol.StringMap(), b.StringMap())
++			}
++		}
++		xopts[vol.ID.String()] = extrainfo{data, vol.Options}
++	}
++
++	// TODO: Note Start time and add metrics
++	// Generate/Regenerate Cluster Level Volfiles
++	for _, cvf := range clusterVolfiles {
++		if cvf.nodeLevel {
++			for _, nodeid := range nodesFromClusterInfo(clusterinfo) {
++				volfile := New(cvf.name)
++				cvf.fn.(clusterVolfileFunc)(volfile, clusterinfo, nodeid)
++				volfiledata, err := volfile.Generate("", &xopts)
++				if err != nil {
++					return err
++				}
++				err = save(nodeid.String()+"-"+volfile.FileName, volfiledata)
++				if err != nil {
++					return err
++				}
++			}
++		} else {
++			volfile := New(cvf.name)
++			cvf.fn.(clusterVolfileFunc)(volfile, clusterinfo, nil)
++			volfiledata, err := volfile.Generate("", &xopts)
++			if err != nil {
++				return err
++			}
++			err = save(volfile.FileName, volfiledata)
++			if err != nil {
++				return err
++			}
++		}
++	}
++
++	// Generate/Regenerate Volume Level Volfiles
++	for _, volinfo := range clusterinfo {
++		for _, vvf := range volumeVolfiles {
++			if vvf.nodeLevel {
++				for _, nodeid := range volinfo.Nodes() {
++					volfile := New(vvf.name)
++					vvf.fn.(volumeVolfileFunc)(volfile, volinfo, nodeid)
++					volfiledata, err := volfile.Generate("", &xopts)
++					if err != nil {
++						return err
++					}
++					err = save(nodeid.String()+"-"+volfile.FileName, volfiledata)
++					if err != nil {
++						return err
++					}
++				}
++			} else {
++				volfile := New(vvf.name)
++				vvf.fn.(volumeVolfileFunc)(volfile, volinfo, nil)
++				volfiledata, err := volfile.Generate("", &xopts)
++				if err != nil {
++					return err
++				}
++				err = save(volfile.FileName, volfiledata)
++				if err != nil {
++					return err
++				}
++			}
++		}
++	}
++
++	// Generate/Regenerate Brick Level Volfiles
++	for _, volinfo := range clusterinfo {
++		nodes := volinfo.Nodes()
++		for _, subvol := range volinfo.Subvols {
++			for _, brick := range subvol.Bricks {
++				for _, bvf := range brickVolfiles {
++					if bvf.nodeLevel {
++						for _, nodeid := range nodes {
++							volfile := New(bvf.name)
++							bvf.fn.(brickVolfileFunc)(volfile, &brick, volinfo, nodeid)
++							volfiledata, err := volfile.Generate("", &xopts)
++							if err != nil {
++								return err
++							}
++							err = save(nodeid.String()+"-"+volfile.FileName, volfiledata)
++							if err != nil {
++								return err
++							}
++						}
++					} else {
++						volfile := New(bvf.name)
++						bvf.fn.(brickVolfileFunc)(volfile, &brick, volinfo, nil)
++						volfiledata, err := volfile.Generate("", &xopts)
++						if err != nil {
++							return err
++						}
++						err = save(volfile.FileName, volfiledata)
++						if err != nil {
++							return err
++						}
++					}
++				}
++			}
++		}
++	}
++	return nil
++}
+diff --git a/glusterd2/volgen2/register.go b/glusterd2/volgen2/register.go
+new file mode 100644
+index 0000000..97bfa95
+--- /dev/null
++++ b/glusterd2/volgen2/register.go
+@@ -0,0 +1,36 @@
++package volgen2
++
++import (
++	"github.com/gluster/glusterd2/glusterd2/brick"
++	"github.com/gluster/glusterd2/glusterd2/volume"
++
++	"github.com/pborman/uuid"
++)
++
++type clusterVolfileFunc func(*Volfile, []*volume.Volinfo, uuid.UUID)
++type volumeVolfileFunc func(*Volfile, *volume.Volinfo, uuid.UUID)
++type brickVolfileFunc func(*Volfile, *brick.Brickinfo, *volume.Volinfo, uuid.UUID)
++
++type volfileFunc struct {
++	name      string
++	fn        interface{}
++	nodeLevel bool
++}
++
++var (
++	clusterVolfiles []volfileFunc
++	volumeVolfiles  []volfileFunc
++	brickVolfiles   []volfileFunc
++)
++
++func registerClusterVolfile(name string, cvf clusterVolfileFunc, nodeLevel bool) {
++	clusterVolfiles = append(clusterVolfiles, volfileFunc{name, cvf, nodeLevel})
++}
++
++func registerVolumeVolfile(name string, vvf volumeVolfileFunc, nodeLevel bool) {
++	volumeVolfiles = append(volumeVolfiles, volfileFunc{name, vvf, nodeLevel})
++}
++
++func registerBrickVolfile(name string, bvf brickVolfileFunc, nodeLevel bool) {
++	brickVolfiles = append(brickVolfiles, volfileFunc{name, bvf, nodeLevel})
++}
+diff --git a/glusterd2/volgen2/store-utils.go b/glusterd2/volgen2/store-utils.go
+new file mode 100644
+index 0000000..600454c
+--- /dev/null
++++ b/glusterd2/volgen2/store-utils.go
+@@ -0,0 +1,36 @@
++package volgen2
++
++import (
++	"context"
++
++	"github.com/gluster/glusterd2/glusterd2/store"
++
++	"github.com/coreos/etcd/clientv3"
++)
++
++var (
++	volfilePrefix = "volfiles/"
++)
++
++func save(name string, content string) error {
++	if _, err := store.Store.Put(context.TODO(), volfilePrefix+name, content); err != nil {
++		return err
++	}
++	return nil
++}
++
++// GetVolfiles returns list of all Volfiles
++func GetVolfiles() ([]string, error) {
++	resp, e := store.Store.Get(context.TODO(), volfilePrefix, clientv3.WithPrefix())
++	if e != nil {
++		return nil, e
++	}
++
++	volfiles := make([]string, len(resp.Kvs))
++
++	for i, kv := range resp.Kvs {
++		volfiles[i] = string(kv.Key)
++	}
++
++	return volfiles, nil
++}
+diff --git a/glusterd2/volgen2/volfile_bitd.go b/glusterd2/volgen2/volfile_bitd.go
+new file mode 100644
+index 0000000..03c4191
+--- /dev/null
++++ b/glusterd2/volgen2/volfile_bitd.go
+@@ -0,0 +1,35 @@
++package volgen2
++
++import (
++	"fmt"
++
++	"github.com/gluster/glusterd2/glusterd2/volume"
++
++	"github.com/pborman/uuid"
++)
++
++func generateBitdVolfile(volfile *Volfile, clusterinfo []*volume.Volinfo, nodeid uuid.UUID) {
++	volfile.FileName = "gluster/bitd"
++
++	bitd := volfile.RootEntry.Add("debug/io-stats", nil, nil).SetName("bitd")
++
++	for volIdx, vol := range clusterinfo {
++		// TODO: If bitrot not enabled for volume, then skip
++		name := fmt.Sprintf("%s-bit-rot-%d", vol.Name, volIdx)
++		bitdvol := bitd.Add("features/bit-rot", vol, nil).SetName(name)
++		for subvolIdx, subvol := range vol.Subvols {
++			for brickIdx, b := range subvol.Bricks {
++				// Only include local bricks
++				if !uuid.Equal(b.NodeID, nodeid) {
++					continue
++				}
++				name := fmt.Sprintf("%s-%d-client-%d", vol.Name, subvolIdx, brickIdx)
++				bitdvol.Add("protocol/client", vol, &b).SetName(name)
++			}
++		}
++	}
++}
++
++func init() {
++	registerClusterVolfile("bitd", generateBitdVolfile, true)
++}
+diff --git a/glusterd2/volgen2/volfile_brick.go b/glusterd2/volgen2/volfile_brick.go
+new file mode 100644
+index 0000000..2d0093f
+--- /dev/null
++++ b/glusterd2/volgen2/volfile_brick.go
+@@ -0,0 +1,49 @@
++package volgen2
++
++import (
++	"fmt"
++	"strings"
++
++	"github.com/gluster/glusterd2/glusterd2/brick"
++	"github.com/gluster/glusterd2/glusterd2/volume"
++
++	"github.com/pborman/uuid"
++)
++
++func generateBrickVolfile(volfile *Volfile, b *brick.Brickinfo, vol *volume.Volinfo, nodeid uuid.UUID) {
++	volfile.FileName = fmt.Sprintf("%s.%s.%s",
++		vol.Name,
++		b.NodeID,
++		strings.Trim(strings.Replace(b.Path, "/", "-", -1), "-"),
++	)
++
++	last := volfile.RootEntry.
++		Add("protocol/server", vol, b).
++		Add("performance/decompounder", vol, b).SetName(b.Path).
++		Add("debug/io-stats", vol, b).
++		Add("features/quota", vol, b).
++		Add("features/index", vol, b).
++		Add("features/barrier", vol, b).
++		Add("features/marker", vol, b).
++		Add("features/selinux", vol, b).
++		Add("performance/io-threads", vol, b).
++		Add("features/upcall", vol, b).
++		Add("features/leases", vol, b).
++		Add("features/read-only", vol, b).
++		Add("features/worm", vol, b).
++		Add("features/locks", vol, b).
++		Add("features/access-control", vol, b).
++		Add("features/bitrot-stub", vol, b).
++		Add("features/changelog", vol, b).
++		Add("features/changetimerecorder", vol, b).
++		Add("features/trash", vol, b)
++
++	if b.Type == brick.Arbiter {
++		last = last.Add("features/arbiter", vol, b)
++	}
++	last.Add("storage/posix", vol, b)
++}
++
++func init() {
++	registerBrickVolfile("brick", generateBrickVolfile, false)
++}
+diff --git a/glusterd2/volgen2/volfile_fuse.go b/glusterd2/volgen2/volfile_fuse.go
+new file mode 100644
+index 0000000..38d2355
+--- /dev/null
++++ b/glusterd2/volgen2/volfile_fuse.go
+@@ -0,0 +1,40 @@
++package volgen2
++
++import (
++	"fmt"
++
++	"github.com/gluster/glusterd2/glusterd2/volume"
++
++	"github.com/pborman/uuid"
++)
++
++func generateTCPFuseVolfile(volfile *Volfile, vol *volume.Volinfo, nodeid uuid.UUID) {
++	volfile.FileName = vol.Name
++
++	dht := volfile.RootEntry.Add("debug/io-stats", vol, nil).SetName(vol.Name).
++		Add("performance/io-threads", vol, nil).
++		Add("performance/md-cache", vol, nil).
++		Add("performance/open-behind", vol, nil).
++		Add("performance/quick-read", vol, nil).
++		Add("performance/io-cache", vol, nil).
++		Add("performance/readdir-ahead", vol, nil).
++		Add("performance/read-ahead", vol, nil).
++		Add("performance/write-behind", vol, nil).
++		Add("cluster/distribute", vol, nil)
++
++	for subvolIdx, subvol := range vol.Subvols {
++		if subvol.Type == volume.SubvolReplicate {
++			name := fmt.Sprintf("%s-replicate-%d", vol.Name, subvolIdx)
++			replicate := dht.Add("cluster/replicate", vol, nil).SetName(name)
++
++			for brickIdx, b := range subvol.Bricks {
++				name := fmt.Sprintf("%s-replicate-%d-client-%d", vol.Name, subvolIdx, brickIdx)
++				replicate.Add("protocol/client", vol, &b).SetName(name)
++			}
++		}
++	}
++}
++
++func init() {
++	registerVolumeVolfile("fuse", generateTCPFuseVolfile, false)
++}
+diff --git a/glusterd2/volgen2/volfile_gfproxy.go b/glusterd2/volgen2/volfile_gfproxy.go
+new file mode 100644
+index 0000000..25e29de
+--- /dev/null
++++ b/glusterd2/volgen2/volfile_gfproxy.go
+@@ -0,0 +1,49 @@
++package volgen2
++
++import (
++	"fmt"
++
++	"github.com/gluster/glusterd2/glusterd2/volume"
++
++	"github.com/pborman/uuid"
++)
++
++func generateTCPGfProxyFuseVolfile(volfile *Volfile, vol *volume.Volinfo, nodeid uuid.UUID) {
++	volfile.FileName = "gfproxy-client/" + vol.Name
++
++	volfile.RootEntry.Add("debug/io-stats", vol, nil).SetName(vol.Name).
++		Add("performance/write-behind", vol, nil).
++		Add("protocol/client", vol, nil).SetExtraData(map[string]string{"brick.path": "gfproxyd-" + vol.Name, "brick.hostname": ""})
++}
++
++func generateGfproxydVolfile(volfile *Volfile, vol *volume.Volinfo, nodeid uuid.UUID) {
++	volfile.FileName = "gfproxyd/" + vol.Name
++
++	dht := volfile.RootEntry.Add("protocol/server", vol, nil).SetExtraData(map[string]string{"brick.path": "", "brick.hostname": ""}).
++		Add("debug/io-stats", vol, nil).SetName(vol.Name).
++		Add("performance/io-threads", vol, nil).
++		Add("performance/md-cache", vol, nil).
++		Add("performance/open-behind", vol, nil).
++		Add("performance/quick-read", vol, nil).
++		Add("performance/io-cache", vol, nil).
++		Add("performance/readdir-ahead", vol, nil).
++		Add("performance/read-ahead", vol, nil).
++		Add("cluster/distribute", vol, nil)
++
++	for subvolIdx, subvol := range vol.Subvols {
++		if subvol.Type == volume.SubvolReplicate {
++			name := fmt.Sprintf("%s-replicate-%d", vol.Name, subvolIdx)
++			replicate := dht.Add("cluster/replicate", vol, nil).SetName(name)
++
++			for brickIdx, b := range subvol.Bricks {
++				name := fmt.Sprintf("%s-replicate-%d-client-%d", vol.Name, subvolIdx, brickIdx)
++				replicate.Add("protocol/client", vol, &b).SetName(name)
++			}
++		}
++	}
++}
++
++func init() {
++	registerVolumeVolfile("gfproxyd", generateGfproxydVolfile, false)
++	registerVolumeVolfile("gfproxy-client", generateTCPGfProxyFuseVolfile, false)
++}
+diff --git a/glusterd2/volgen2/volfile_quotad.go b/glusterd2/volgen2/volfile_quotad.go
+new file mode 100644
+index 0000000..de7e4bf
+--- /dev/null
++++ b/glusterd2/volgen2/volfile_quotad.go
+@@ -0,0 +1,40 @@
++package volgen2
++
++import (
++	"fmt"
++
++	"github.com/gluster/glusterd2/glusterd2/volume"
++
++	"github.com/pborman/uuid"
++)
++
++func generateQuotadVolfile(volfile *Volfile, clusterinfo []*volume.Volinfo, nodeid uuid.UUID) {
++	volfile.FileName = "gluster/quotad"
++
++	quotaOpts := make(map[string]string)
++
++	for _, v := range clusterinfo {
++		quotaOpts[v.Name+".volume-id"] = v.Name
++	}
++
++	quota := volfile.RootEntry.Add("features/quotad", nil, nil).SetName("quotad").SetExtraOptions(quotaOpts)
++
++	for _, v := range clusterinfo {
++		dht := quota.Add("cluster/distribute", v, nil).SetName(v.Name)
++
++		for i, subvol := range v.Subvols {
++			if subvol.Type == volume.SubvolReplicate {
++				name := fmt.Sprintf("%s-replicate-%d", v.Name, i)
++				replicate := dht.Add("cluster/replicate", v, nil).SetName(name)
++				for j, b := range subvol.Bricks {
++					name := fmt.Sprintf("%s-replicate-%d-client-%d", v.Name, i, j)
++					replicate.Add("protocol/client", v, &b).SetName(name)
++				}
++			}
++		}
++	}
++}
++
++func init() {
++	registerClusterVolfile("quotad", generateQuotadVolfile, false)
++}
+diff --git a/glusterd2/volgen2/volfile_rebalance.go b/glusterd2/volgen2/volfile_rebalance.go
+new file mode 100644
+index 0000000..0562a52
+--- /dev/null
++++ b/glusterd2/volgen2/volfile_rebalance.go
+@@ -0,0 +1,32 @@
++package volgen2
++
++import (
++	"fmt"
++
++	"github.com/gluster/glusterd2/glusterd2/volume"
++
++	"github.com/pborman/uuid"
++)
++
++func generateRebalanceVolfile(volfile *Volfile, vol *volume.Volinfo, nodeid uuid.UUID) {
++	volfile.FileName = "rebalance/" + vol.Name
++
++	dht := volfile.RootEntry.Add("debug/io-stats", vol, nil).SetName(vol.Name).
++		Add("cluster/distribute", vol, nil)
++
++	for subvolIdx, subvol := range vol.Subvols {
++		if subvol.Type == volume.SubvolReplicate {
++			name := fmt.Sprintf("%s-replicate-%d", vol.Name, subvolIdx)
++			replicate := dht.Add("cluster/replicate", vol, nil).SetName(name)
++
++			for brickIdx, b := range subvol.Bricks {
++				name := fmt.Sprintf("%s-replicate-%d-client-%d", vol.Name, subvolIdx, brickIdx)
++				replicate.Add("protocol/client", vol, &b).SetName(name)
++			}
++		}
++	}
++}
++
++func init() {
++	registerVolumeVolfile("rebalance", generateRebalanceVolfile, false)
++}
+diff --git a/glusterd2/volgen2/volfile_shd.go b/glusterd2/volgen2/volfile_shd.go
+new file mode 100644
+index 0000000..c3dc027
+--- /dev/null
++++ b/glusterd2/volgen2/volfile_shd.go
+@@ -0,0 +1,31 @@
++package volgen2
++
++import (
++	"fmt"
++
++	"github.com/gluster/glusterd2/glusterd2/volume"
++
++	"github.com/pborman/uuid"
++)
++
++func generateShdVolfile(volfile *Volfile, clusterinfo []*volume.Volinfo, nodeid uuid.UUID) {
++	volfile.FileName = "gluster/glustershd"
++	shd := volfile.RootEntry.Add("debug/io-stats", nil, nil).SetName("glustershd")
++
++	for _, vol := range clusterinfo {
++		for subvolIdx, subvol := range vol.Subvols {
++			if subvol.Type == volume.SubvolReplicate {
++				name := fmt.Sprintf("%s-replicate-%d", vol, subvolIdx)
++				replicate := shd.Add("cluster/replicate", vol, nil).SetName(name)
++				for brickIdx, b := range subvol.Bricks {
++					name := fmt.Sprintf("%s-replicate-%d-client-%d", vol.Name, subvolIdx, brickIdx)
++					replicate.Add("protocol/client", vol, &b).SetName(name)
++				}
++			}
++		}
++	}
++}
++
++func init() {
++	registerClusterVolfile("glustershd", generateShdVolfile, false)
++}
+diff --git a/glusterd2/volgen2/volgen.go b/glusterd2/volgen2/volgen.go
+new file mode 100644
+index 0000000..6ad65f8
+--- /dev/null
++++ b/glusterd2/volgen2/volgen.go
+@@ -0,0 +1,277 @@
++package volgen2
++
++import (
++	"errors"
++	"fmt"
++	"path"
++	"regexp"
++	"strings"
++
++	"github.com/gluster/glusterd2/glusterd2/brick"
++	"github.com/gluster/glusterd2/glusterd2/volume"
++	"github.com/gluster/glusterd2/glusterd2/xlator"
++	"github.com/gluster/glusterd2/pkg/utils"
++
++	"github.com/pborman/uuid"
++)
++
++var varStrRE = regexp.MustCompile(`\{\{\s*(\S+)\s*\}\}`)
++
++// UnknownVarStrErr is returned when a varstring is not found in the given map
++type UnknownVarStrErr string
++
++func (e UnknownVarStrErr) Error() string {
++	return fmt.Sprintf("unknown variable string: %s", string(e))
++}
++
++func isVarStr(s string) bool {
++	return varStrRE.MatchString(s)
++}
++
++func varStr(s string) string {
++	return strings.Trim(varStrRE.FindString(s), "{} ")
++}
++
++func varStrReplace(s string, vals map[string]string) (string, error) {
++	k := varStr(s)
++	v, ok := vals[k]
++	if !ok {
++		return "", UnknownVarStrErr(k)
++	}
++	return varStrRE.ReplaceAllString(s, v), nil
++}
++
++// Entry represents one Xlator entry in Volfile
++type Entry struct {
++	Name         string
++	Type         string
++	VolumeID     uuid.UUID
++	BrickID      uuid.UUID
++	ExtraOptions map[string]string
++	ExtraData    map[string]string
++	SubEntries   []Entry
++}
++
++// Volfile represents Gluster Volfile
++type Volfile struct {
++	Name      string
++	FileName  string
++	RootEntry Entry
++}
++
++// New initializes Entry structure
++func New(name string) *Volfile {
++	return &Volfile{Name: name, RootEntry: Entry{}}
++}
++
++// Add adds sub entry
++func (e *Entry) Add(xlatorType string, vol *volume.Volinfo, b *brick.Brickinfo) *Entry {
++	name := ""
++	var volid uuid.UUID
++	var brickid uuid.UUID
++
++	if vol != nil {
++		volid = vol.ID
++		name = vol.Name + "-" + path.Base(xlatorType)
++	}
++
++	if b != nil {
++		brickid = b.ID
++	}
++
++	e.SubEntries = append(e.SubEntries, Entry{Name: name, VolumeID: volid, BrickID: brickid, Type: xlatorType})
++
++	// Return the last element's pointer, useful if sub elements to be added to the newly added element
++	return &e.SubEntries[len(e.SubEntries)-1]
++}
++
++// SetName sets entry name
++func (e *Entry) SetName(name string) *Entry {
++	e.Name = name
++	return e
++}
++
++// SetExtraOptions sets extra options
++func (e *Entry) SetExtraOptions(opts map[string]string) *Entry {
++	e.ExtraOptions = opts
++	return e
++}
++
++// SetExtraData sets extra data
++func (e *Entry) SetExtraData(data map[string]string) *Entry {
++	e.ExtraData = data
++	return e
++}
++
++// getValue returns value if found for provided graph.xlator.keys in the options map
++// XXX: Not possibly the best place for this
++func getValue(graph, xl string, keys []string, opts map[string]string) (string, string, bool) {
++	for _, k := range keys {
++		v, ok := opts[graph+"."+xl+"."+k]
++		if ok {
++			return k, v, true
++		}
++		v, ok = opts[xl+"."+k]
++		if ok {
++			return k, v, true
++		}
++	}
++
++	return "", "", false
++}
++
++func (e *Entry) getOptions(graph string, extra *map[string]extrainfo) (map[string]string, error) {
++	var (
++		xl  *xlator.Xlator
++		err error
++	)
++
++	xlid := path.Base(e.Type)
++	xl, err = xlator.Find(xlid)
++	if err != nil {
++		return nil, err
++	}
++
++	opts := make(map[string]string)
++	if e.VolumeID != nil {
++		opts = (*extra)[e.VolumeID.String()].Options
++	}
++
++	data := make(map[string]string)
++	if e.VolumeID != nil {
++		key := e.VolumeID.String()
++
++		if e.BrickID != nil {
++			key += "." + e.BrickID.String()
++		}
++		data = (*extra)[e.VolumeID.String()].StringMaps[key]
++	}
++
++	data = utils.MergeStringMaps(data, e.ExtraData)
++
++	xlopts := make(map[string]string)
++
++	for _, o := range xl.Options {
++		var (
++			k, v string
++			ok   bool
++		)
++
++		// If the option has an explicit SetKey, use it as the key
++		if o.SetKey != "" {
++			k = o.SetKey
++			_, v, ok = getValue(graph, xlid, o.Key, opts)
++		} else {
++			k, v, ok = getValue(graph, xlid, o.Key, opts)
++		}
++
++		// If the option is not found in Volinfo, try to set to defaults if
++		// available and required
++		if !ok {
++			// If there is no default value skip setting this option
++			if o.DefaultValue == "" {
++				continue
++			}
++			v = o.DefaultValue
++
++			if k == "" {
++				k = o.Key[0]
++			}
++
++			// If neither key nor value is a varstring, skip setting this option
++			if !isVarStr(k) && !isVarStr(v) {
++				continue
++			}
++		}
++
++		// Do varsting replacements if required
++		keyChanged := false
++		keyVarStr := isVarStr(k)
++		if keyVarStr {
++			k1, err := varStrReplace(k, data)
++			if err != nil {
++				return nil, err
++			}
++			if k != k1 {
++				keyChanged = true
++			}
++			k = k1
++		}
++		if isVarStr(v) {
++			if v, err = varStrReplace(v, data); err != nil {
++				return nil, err
++			}
++		}
++		// Set the option
++		// Ignore setting if value is empty or if key is
++		// varstr and not changed after substitute. This can happen
++		// only if the field value is empty
++		if v != "" || (keyVarStr && !keyChanged) {
++			xlopts[k] = v
++		}
++	}
++
++	// Set all the extra Options
++	for k, v := range e.ExtraOptions {
++		xlopts[k] = v
++	}
++
++	return xlopts, nil
++}
++
++// Generate generates Volfile content
++func (v *Volfile) Generate(graph string, extra *map[string]extrainfo) (string, error) {
++	if v.Name == "" || v.FileName == "" {
++		return "", errors.New("Incomplete details")
++	}
++
++	return v.RootEntry.Generate(graph, extra)
++
++}
++
++// Generate generates the Volfile content
++func (e *Entry) Generate(graph string, extra *map[string]extrainfo) (string, error) {
++	if graph == "" {
++		graph = e.Name
++	}
++
++	out := ""
++	subvolumes := []string{}
++	for _, entry := range e.SubEntries {
++		out1, err := entry.Generate(graph, extra)
++		if err != nil {
++			return "", err
++		}
++		out += out1
++		subvolumes = append(subvolumes, entry.Name)
++	}
++
++	if e.Type == "" {
++		return out, nil
++	}
++
++	// volume <name>
++	out += "volume " + e.Name + "\n"
++
++	// type <type>
++	out += "    type " + e.Type + "\n"
++
++	// option <key> <value>
++	// ty := path.Base(e.Type)
++	opts, err := e.getOptions(graph, extra)
++	if err != nil {
++		return "", err
++	}
++	for k, v := range opts {
++		out += "    option " + k + " " + v + "\n"
++	}
++
++	// subvolumes <subvol1,subvol2..>
++	if len(subvolumes) > 0 {
++		out += "    subvolumes " + strings.Join(subvolumes, " ") + "\n"
++	}
++
++	// end volume
++	out += "end-volume\n\n"
++	return out, nil
++}
+diff --git a/glusterd2/volume/struct.go b/glusterd2/volume/struct.go
+index 7a4e02f..36a793a 100644
+--- a/glusterd2/volume/struct.go
++++ b/glusterd2/volume/struct.go
+@@ -12,6 +12,7 @@ import (
+ 	"github.com/gluster/glusterd2/glusterd2/brick"
+ 	"github.com/gluster/glusterd2/glusterd2/gdctx"
+ 	"github.com/gluster/glusterd2/glusterd2/peer"
++	"github.com/gluster/glusterd2/pkg/api"
+ 	"github.com/gluster/glusterd2/pkg/utils"
+ 
+ 	"github.com/pborman/uuid"
+@@ -56,22 +57,43 @@ const (
+ 	DistDisperse
+ )
+ 
+-// Volinfo repesents a volume
+-type Volinfo struct {
+-	ID           uuid.UUID
++// SubvolType is the Type of the volume
++//go:generate stringer -type=SubvolType
++type SubvolType uint16
++
++const (
++	// SubvolDistribute is a distribute sub volume
++	SubvolDistribute SubvolType = iota
++	// SubvolReplicate is a replicate sub volume
++	SubvolReplicate
++	// SubvolDisperse is a disperse sub volume
++	SubvolDisperse
++)
++
++// Subvol represents a sub volume
++type Subvol struct {
+ 	Name         string
+-	Type         VolType
+-	Transport    string
+-	DistCount    int
++	Type         SubvolType
++	Bricks       []brick.Brickinfo
++	Subvols      []Subvol
+ 	ReplicaCount int
+ 	ArbiterCount int
+-	Options      map[string]string
+-	State        VolState
+-	Checksum     uint64
+-	Version      uint64
+-	Bricks       []brick.Brickinfo
+-	Auth         VolAuth // TODO: should not be returned to client
+-	GraphMap     map[string]string
++}
++
++// Volinfo repesents a volume
++type Volinfo struct {
++	ID        uuid.UUID
++	Name      string
++	Type      VolType
++	Transport string
++	DistCount int
++	Options   map[string]string
++	State     VolState
++	Checksum  uint64
++	Version   uint64
++	Subvols   []Subvol
++	Auth      VolAuth // TODO: should not be returned to client
++	GraphMap  map[string]string
+ }
+ 
+ // VolAuth represents username and password used by trusted/internal clients
+@@ -95,22 +117,17 @@ func (v *Volinfo) StringMap() map[string]string {
+ }
+ 
+ // NewBrickEntries creates the brick list
+-func NewBrickEntries(bricks []string, volName string, volID uuid.UUID) ([]brick.Brickinfo, error) {
++func NewBrickEntries(bricks []api.BrickReq, volName string, volID uuid.UUID) ([]brick.Brickinfo, error) {
+ 	var brickInfos []brick.Brickinfo
+ 	var binfo brick.Brickinfo
+ 
+ 	for _, b := range bricks {
+-		node, path, e := utils.ParseHostAndBrickPath(b)
+-		if e != nil {
+-			return nil, e
+-		}
+-
+-		u := uuid.Parse(node)
++		u := uuid.Parse(b.NodeID)
+ 		if u == nil {
+ 			return nil, errors.New("Invalid UUID specified as host for brick")
+ 		}
+ 
+-		p, e := peer.GetPeerF(node)
++		p, e := peer.GetPeerF(b.NodeID)
+ 		if e != nil {
+ 			return nil, e
+ 		}
+@@ -119,12 +136,19 @@ func NewBrickEntries(bricks []string, volName string, volID uuid.UUID) ([]brick.
+ 		// TODO: Have a better way to select peer address here
+ 		binfo.Hostname, _, _ = net.SplitHostPort(p.Addresses[0])
+ 
+-		binfo.Path, e = absFilePath(path)
++		binfo.Path, e = absFilePath(b.Path)
+ 		if e != nil {
+ 			log.Error("Failed to convert the brickpath to absolute path")
+ 			return nil, e
+ 		}
+ 
++		switch b.Type {
++		case "arbiter":
++			binfo.Type = brick.Arbiter
++		default:
++			binfo.Type = brick.Brick
++		}
++
+ 		binfo.VolumeName = volName
+ 		binfo.VolumeID = volID
+ 		binfo.ID = uuid.NewRandom()
+@@ -184,18 +208,20 @@ func (v *Volinfo) Nodes() []uuid.UUID {
+ 
+ 	// This shouldn't be very inefficient for small slices.
+ 	var present bool
+-	for _, b := range v.Bricks {
+-		// Add node to the slice only if it isn't present already
+-		present = false
+-		for _, n := range nodes {
+-			if uuid.Equal(b.NodeID, n) == true {
+-				present = true
+-				break
++	for _, subvol := range v.Subvols {
++		for _, b := range subvol.Bricks {
++			// Add node to the slice only if it isn't present already
++			present = false
++			for _, n := range nodes {
++				if uuid.Equal(b.NodeID, n) == true {
++					present = true
++					break
++				}
+ 			}
+-		}
+ 
+-		if present == false {
+-			nodes = append(nodes, b.NodeID)
++			if present == false {
++				nodes = append(nodes, b.NodeID)
++			}
+ 		}
+ 	}
+ 	return nodes
+diff --git a/glusterd2/volume/volume-utils.go b/glusterd2/volume/volume-utils.go
+index 435f999..c1f755c 100644
+--- a/glusterd2/volume/volume-utils.go
++++ b/glusterd2/volume/volume-utils.go
+@@ -18,10 +18,12 @@ func isBrickPathAvailable(nodeID uuid.UUID, brickPath string) error {
+ 		return nil
+ 	}
+ 	for _, v := range volumes {
+-		for _, b := range v.Bricks {
+-			if uuid.Equal(b.NodeID, nodeID) && b.Path == brickPath {
+-				log.Error("Brick is already used by ", v.Name)
+-				return errors.ErrBrickPathAlreadyInUse
++		for _, subvol := range v.Subvols {
++			for _, b := range subvol.Bricks {
++				if uuid.Equal(b.NodeID, nodeID) && b.Path == brickPath {
++					log.Error("Brick is already used by ", v.Name)
++					return errors.ErrBrickPathAlreadyInUse
++				}
+ 			}
+ 		}
+ 	}
+diff --git a/glusterd2/volume/volume_test.go b/glusterd2/volume/volume_test.go
+index f37079f..bd1bcab 100644
+--- a/glusterd2/volume/volume_test.go
++++ b/glusterd2/volume/volume_test.go
+@@ -1,10 +1,10 @@
+ package volume
+ 
+ import (
+-	"fmt"
+ 	"testing"
+ 
+ 	"github.com/gluster/glusterd2/glusterd2/peer"
++	"github.com/gluster/glusterd2/pkg/api"
+ 	"github.com/gluster/glusterd2/pkg/errors"
+ 	"github.com/gluster/glusterd2/pkg/testutils"
+ 
+@@ -25,15 +25,13 @@ func find(haystack []string, needle string) bool {
+ 
+ // getSampleBricks prepare a list of couple of bricks with the path names as
+ // input along with the local uuid
+-func getSampleBricks(b1 string, b2 string) []string {
++func getSampleBricks(b1 string, b2 string) []api.BrickReq {
+ 
+-	var bricks []string
+ 	lhost := uuid.NewRandom()
+-	brick1 := fmt.Sprintf("%s:%s", lhost, b1)
+-	brick2 := fmt.Sprintf("%s:%s", lhost, b2)
+-	bricks = append(bricks, brick1)
+-	bricks = append(bricks, brick2)
+-	return bricks
++	return []api.BrickReq{
++		{NodeID: lhost.String(), Path: b1},
++		{NodeID: lhost.String(), Path: b2},
++	}
+ }
+ 
+ // TestNewBrickEntry validates NewBrickEntries ()
+@@ -52,7 +50,10 @@ func TestNewBrickEntry(t *testing.T) {
+ 	}
+ 
+ 	// Some negative tests
+-	mockBricks := []string{"/tmp/b1", "/tmp/b2"} //with out IPs
++	mockBricks := []api.BrickReq{
++		{NodeID: "", Path: "/tmp/b1"},
++		{NodeID: "", Path: "/tmp/b2"},
++	} //with out IPs
+ 	_, err = NewBrickEntriesFunc(mockBricks, "volume", nil)
+ 	assert.NotNil(t, err)
+ 
+diff --git a/pkg/api/bricktype.go b/pkg/api/bricktype.go
+new file mode 100644
+index 0000000..13aebb5
+--- /dev/null
++++ b/pkg/api/bricktype.go
+@@ -0,0 +1,12 @@
++package api
++
++// BrickType is the type of Brick
++//go:generate jsonenums -type=BrickType
++type BrickType uint16
++
++const (
++	// Brick represents default type of brick
++	Brick BrickType = iota
++	// Arbiter represents Arbiter brick type
++	Arbiter
++)
+diff --git a/pkg/api/bricktype_jsonenums.go b/pkg/api/bricktype_jsonenums.go
+new file mode 100644
+index 0000000..7e4bf65
+--- /dev/null
++++ b/pkg/api/bricktype_jsonenums.go
+@@ -0,0 +1,56 @@
++// generated by jsonenums -type=BrickType; DO NOT EDIT
++
++package api
++
++import (
++	"encoding/json"
++	"fmt"
++)
++
++var (
++	_BrickTypeNameToValue = map[string]BrickType{
++		"Brick":   Brick,
++		"Arbiter": Arbiter,
++	}
++
++	_BrickTypeValueToName = map[BrickType]string{
++		Brick:   "Brick",
++		Arbiter: "Arbiter",
++	}
++)
++
++func init() {
++	var v BrickType
++	if _, ok := interface{}(v).(fmt.Stringer); ok {
++		_BrickTypeNameToValue = map[string]BrickType{
++			interface{}(Brick).(fmt.Stringer).String():   Brick,
++			interface{}(Arbiter).(fmt.Stringer).String(): Arbiter,
++		}
++	}
++}
++
++// MarshalJSON is generated so BrickType satisfies json.Marshaler.
++func (r BrickType) MarshalJSON() ([]byte, error) {
++	if s, ok := interface{}(r).(fmt.Stringer); ok {
++		return json.Marshal(s.String())
++	}
++	s, ok := _BrickTypeValueToName[r]
++	if !ok {
++		return nil, fmt.Errorf("invalid BrickType: %d", r)
++	}
++	return json.Marshal(s)
++}
++
++// UnmarshalJSON is generated so BrickType satisfies json.Unmarshaler.
++func (r *BrickType) UnmarshalJSON(data []byte) error {
++	var s string
++	if err := json.Unmarshal(data, &s); err != nil {
++		return fmt.Errorf("BrickType should be a string, got %s", data)
++	}
++	v, ok := _BrickTypeNameToValue[s]
++	if !ok {
++		return fmt.Errorf("invalid BrickType %q", s)
++	}
++	*r = v
++	return nil
++}
+diff --git a/pkg/api/subvoltype.go b/pkg/api/subvoltype.go
+new file mode 100644
+index 0000000..0f1e7e9
+--- /dev/null
++++ b/pkg/api/subvoltype.go
+@@ -0,0 +1,14 @@
++package api
++
++// SubvolType is the Type of the volume
++//go:generate jsonenums -type=SubvolType
++type SubvolType uint16
++
++const (
++	// SubvolDistribute is a distribute sub volume
++	SubvolDistribute SubvolType = iota
++	// SubvolReplicate is a replicate sub volume
++	SubvolReplicate
++	// SubvolDisperse is a disperse sub volume
++	SubvolDisperse
++)
+diff --git a/pkg/api/subvoltype_jsonenums.go b/pkg/api/subvoltype_jsonenums.go
+new file mode 100644
+index 0000000..5c1a157
+--- /dev/null
++++ b/pkg/api/subvoltype_jsonenums.go
+@@ -0,0 +1,59 @@
++// generated by jsonenums -type=SubvolType; DO NOT EDIT
++
++package api
++
++import (
++	"encoding/json"
++	"fmt"
++)
++
++var (
++	_SubvolTypeNameToValue = map[string]SubvolType{
++		"Distribute": SubvolDistribute,
++		"Replicate":  SubvolReplicate,
++		"Disperse":   SubvolDisperse,
++	}
++
++	_SubvolTypeValueToName = map[SubvolType]string{
++		SubvolDistribute: "Distribute",
++		SubvolReplicate:  "Replicate",
++		SubvolDisperse:   "Disperse",
++	}
++)
++
++func init() {
++	var v SubvolType
++	if _, ok := interface{}(v).(fmt.Stringer); ok {
++		_SubvolTypeNameToValue = map[string]SubvolType{
++			interface{}(SubvolDistribute).(fmt.Stringer).String(): SubvolDistribute,
++			interface{}(SubvolReplicate).(fmt.Stringer).String():  SubvolReplicate,
++			interface{}(SubvolDisperse).(fmt.Stringer).String():   SubvolDisperse,
++		}
++	}
++}
++
++// MarshalJSON is generated so SubvolType satisfies json.Marshaler.
++func (r SubvolType) MarshalJSON() ([]byte, error) {
++	if s, ok := interface{}(r).(fmt.Stringer); ok {
++		return json.Marshal(s.String())
++	}
++	s, ok := _SubvolTypeValueToName[r]
++	if !ok {
++		return nil, fmt.Errorf("invalid SubvolType: %d", r)
++	}
++	return json.Marshal(s)
++}
++
++// UnmarshalJSON is generated so SubvolType satisfies json.Unmarshaler.
++func (r *SubvolType) UnmarshalJSON(data []byte) error {
++	var s string
++	if err := json.Unmarshal(data, &s); err != nil {
++		return fmt.Errorf("SubvolType should be a string, got %s", data)
++	}
++	v, ok := _SubvolTypeNameToValue[s]
++	if !ok {
++		return fmt.Errorf("invalid SubvolType %q", s)
++	}
++	*r = v
++	return nil
++}
+diff --git a/pkg/api/volume_req.go b/pkg/api/volume_req.go
+index bf1a5d4..7265239 100644
+--- a/pkg/api/volume_req.go
++++ b/pkg/api/volume_req.go
+@@ -1,12 +1,27 @@
+ package api
+ 
++// BrickReq represents Brick Request
++type BrickReq struct {
++	Type   string `json:"type"`
++	NodeID string `json:"nodeid"`
++	Path   string `json:"path"`
++}
++
++// SubvolReq represents Sub volume Request
++type SubvolReq struct {
++	Name         string      `json:"name"`
++	Type         string      `json:"type"`
++	Bricks       []BrickReq  `json:"bricks"`
++	Subvols      []SubvolReq `json:"subvols"`
++	ReplicaCount int         `json:"replica"`
++	ArbiterCount int         `json:"arbiter"`
++}
++
+ // VolCreateReq represents a Volume Create Request
+ type VolCreateReq struct {
+ 	Name      string            `json:"name"`
+ 	Transport string            `json:"transport,omitempty"`
+-	Replica   int               `json:"replica,omitempty"`
+-	Arbiter   int               `json:"arbiter,omitempty"`
+-	Bricks    []string          `json:"bricks"`
++	Subvols   []SubvolReq       `json:"subvols"`
+ 	Options   map[string]string `json:"options,omitempty"`
+ 	Force     bool              `json:"force,omitempty"`
+ }
+@@ -18,6 +33,6 @@ type VolOptionReq struct {
+ 
+ // VolExpandReq represents a request to expand the volume by adding more bricks
+ type VolExpandReq struct {
+-	ReplicaCount int      `json:"replica,omitempty"`
+-	Bricks       []string `json:"bricks"`
++	ReplicaCount int        `json:"replica,omitempty"`
++	Bricks       []BrickReq `json:"bricks"`
+ }
+diff --git a/pkg/api/volume_resp.go b/pkg/api/volume_resp.go
+index ac82448..494b38d 100644
+--- a/pkg/api/volume_resp.go
++++ b/pkg/api/volume_resp.go
+@@ -11,6 +11,17 @@ type BrickInfo struct {
+ 	VolumeName string    `json:"volume-name"`
+ 	NodeID     uuid.UUID `json:"node-id"`
+ 	Hostname   string    `json:"host"`
++	Type       BrickType `json:"type"`
++}
++
++// Subvol contains static information about sub volume
++type Subvol struct {
++	Name         string      `json:"name"`
++	Type         SubvolType  `json:"type"`
++	Bricks       []BrickInfo `json:"bricks"`
++	Subvols      []Subvol    `json:"subvols,omitempty"`
++	ReplicaCount int         `json:"replica-count"`
++	ArbiterCount int         `json:"arbiter-count"`
+ }
+ 
+ // BrickStatus contains the runtime information about the brick.
+@@ -34,7 +45,7 @@ type VolumeInfo struct {
+ 	ArbiterCount int               `json:"arbiter-count"`
+ 	Options      map[string]string `json:"options"`
+ 	State        VolState          `json:"state"`
+-	Bricks       []BrickInfo       `json:"bricks"`
++	Subvols      []Subvol          `json:"subvols"`
+ }
+ 
+ // VolumeStatusResp response contains the statuses of all bricks of the volume.
+diff --git a/pkg/restclient/examples/main.go b/pkg/restclient/examples/main.go
+deleted file mode 100644
+index f6f6a34..0000000
+--- a/pkg/restclient/examples/main.go
++++ /dev/null
+@@ -1,39 +0,0 @@
+-package main
+-
+-import (
+-	"fmt"
+-
+-	"github.com/gluster/glusterd2/pkg/api"
+-	"github.com/gluster/glusterd2/pkg/restclient"
+-)
+-
+-const (
+-	baseURL  = "http://localhost:24007"
+-	username = ""
+-	password = ""
+-	cacert   = ""
+-	insecure = false
+-	peerNode = "node2"
+-	volname  = "gv1"
+-	brick1   = "10.70.1.111:/bricks/b1"
+-	brick2   = "10.70.1.111:/bricks/b2"
+-	force    = true
+-	replica  = 0
+-)
+-
+-func main() {
+-	client := restclient.New(baseURL, username, password, cacert, insecure)
+-	fmt.Println(client.PeerProbe(peerNode))
+-	fmt.Println(client.Peers())
+-	fmt.Println(client.PeerDetach(peerNode))
+-	req := api.VolCreateReq{
+-		Name:    volname,
+-		Bricks:  []string{brick1, brick2},
+-		Replica: replica,
+-		Force:   force,
+-	}
+-	fmt.Println(client.VolumeCreate(req))
+-	fmt.Println(client.VolumeStart(volname))
+-	fmt.Println(client.VolumeStop(volname))
+-	fmt.Println(client.VolumeDelete(volname))
+-}
+diff --git a/plugins/georeplication/rest.go b/plugins/georeplication/rest.go
+index ffc8ea8..35e749e 100644
+--- a/plugins/georeplication/rest.go
++++ b/plugins/georeplication/rest.go
+@@ -441,30 +441,32 @@ func georepStatusHandler(w http.ResponseWriter, r *http.Request) {
+ 		return
+ 	}
+ 
+-	for _, b := range vol.Bricks {
+-		// Set default values to all status fields, If a node or worker is down and
+-		// status not available these default values will be sent back in response
+-		geoSession.Workers = append(geoSession.Workers, georepapi.GeorepWorker{
+-			MasterNode:                 "",
+-			MasterNodeID:               b.NodeID.String(),
+-			MasterBrickPath:            b.Path,
+-			MasterBrick:                b.NodeID.String() + ":" + b.Path,
+-			Status:                     "Unknown",
+-			LastSyncedTime:             "N/A",
+-			LastSyncedTimeUTC:          "N/A",
+-			LastEntrySyncedTime:        "N/A",
+-			SlaveNode:                  "N/A",
+-			CheckpointTime:             "N/A",
+-			CheckpointTimeUTC:          "N/A",
+-			CheckpointCompleted:        "N/A",
+-			CheckpointCompletedTime:    "N/A",
+-			CheckpointCompletedTimeUTC: "N/A",
+-			MetaOps:                    "0",
+-			EntryOps:                   "0",
+-			DataOps:                    "0",
+-			FailedOps:                  "0",
+-			CrawlStatus:                "N/A",
+-		})
++	for _, subvol := range vol.Subvols {
++		for _, b := range subvol.Bricks {
++			// Set default values to all status fields, If a node or worker is down and
++			// status not available these default values will be sent back in response
++			geoSession.Workers = append(geoSession.Workers, georepapi.GeorepWorker{
++				MasterNode:                 "",
++				MasterNodeID:               b.NodeID.String(),
++				MasterBrickPath:            b.Path,
++				MasterBrick:                b.NodeID.String() + ":" + b.Path,
++				Status:                     "Unknown",
++				LastSyncedTime:             "N/A",
++				LastSyncedTimeUTC:          "N/A",
++				LastEntrySyncedTime:        "N/A",
++				SlaveNode:                  "N/A",
++				CheckpointTime:             "N/A",
++				CheckpointTimeUTC:          "N/A",
++				CheckpointCompleted:        "N/A",
++				CheckpointCompletedTime:    "N/A",
++				CheckpointCompletedTimeUTC: "N/A",
++				MetaOps:                    "0",
++				EntryOps:                   "0",
++				DataOps:                    "0",
++				FailedOps:                  "0",
++				CrawlStatus:                "N/A",
++			})
++		}
+ 	}
+ 
+ 	// Iterating and assigning status of each brick and not doing direct
+diff --git a/plugins/georeplication/transactions.go b/plugins/georeplication/transactions.go
+index d2af60c..cf85374 100644
+--- a/plugins/georeplication/transactions.go
++++ b/plugins/georeplication/transactions.go
+@@ -144,31 +144,33 @@ func txnGeorepStatus(c transaction.TxnCtx) error {
+ 
+ 	var workersStatuses = make(map[string]georepapi.GeorepWorker)
+ 
+-	for _, w := range volinfo.Bricks {
+-
+-		if !uuid.Equal(w.NodeID, gdctx.MyUUID) {
+-			continue
+-		}
+-
+-		gsyncd, err := newGsyncd(*sessioninfo)
+-		if err != nil {
+-			return err
+-		}
+-		args := gsyncd.statusArgs(w.Path)
+-
+-		out, err := exec.Command(gsyncdCommand, args...).Output()
+-		if err != nil {
+-			return err
++	for _, subvol := range volinfo.Subvols {
++		for _, w := range subvol.Bricks {
++
++			if !uuid.Equal(w.NodeID, gdctx.MyUUID) {
++				continue
++			}
++
++			gsyncd, err := newGsyncd(*sessioninfo)
++			if err != nil {
++				return err
++			}
++			args := gsyncd.statusArgs(w.Path)
++
++			out, err := exec.Command(gsyncdCommand, args...).Output()
++			if err != nil {
++				return err
++			}
++
++			var worker georepapi.GeorepWorker
++			if err = json.Unmarshal(out, &worker); err != nil {
++				return err
++			}
++
++			// Unique key for master brick UUID:BRICK_PATH
++			key := gdctx.MyUUID.String() + ":" + w.Path
++			workersStatuses[key] = worker
+ 		}
+-
+-		var worker georepapi.GeorepWorker
+-		if err = json.Unmarshal(out, &worker); err != nil {
+-			return err
+-		}
+-
+-		// Unique key for master brick UUID:BRICK_PATH
+-		key := gdctx.MyUUID.String() + ":" + w.Path
+-		workersStatuses[key] = worker
+ 	}
+ 
+ 	c.SetNodeResult(gdctx.MyUUID, gsyncdStatusTxnKey, workersStatuses)
+-- 
+2.13.5
+
