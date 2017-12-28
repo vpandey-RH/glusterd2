@@ -63,7 +63,16 @@ index eaa0a7a..0765ba7 100644
  //Exists check whether a given volume exist or not
  func Exists(name string) bool {
  	resp, e := store.Store.Get(context.TODO(), volumePrefix+name)
-
+diff --git a/glusterd2/volume/struct.go b/glusterd2/volume/struct.go
+index da7b074..cbf6860 100644
+--- a/glusterd2/volume/struct.go
++++ b/glusterd2/volume/struct.go
+@@ -71,6 +71,7 @@ type Volinfo struct {
+ 	Bricks       []brick.Brickinfo
+ 	Auth         VolAuth // TODO: should not be returned to client
+ 	GraphMap     map[string]string
++	HealFlag     bool
+ }
 
  // VolAuth represents username and password used by trusted/internal clients
 diff --git a/plugins/glustershd/glustershd.go b/plugins/glustershd/glustershd.go

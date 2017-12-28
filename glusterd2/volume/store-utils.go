@@ -5,10 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 
+	"github.com/coreos/etcd/clientv3"
 	"github.com/gluster/glusterd2/glusterd2/store"
 	"github.com/pborman/uuid"
-
-	"github.com/coreos/etcd/clientv3"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -118,6 +117,42 @@ func GetVolumes() ([]*Volinfo, error) {
 	}
 
 	return volumes, nil
+}
+
+// CheckReplicateVolumesStatus retrieves the voliinfo objects from GetVolumes() function
+// and checks if all replicate, Disperse volumes are stopped before
+// stopping the self heal daemon.
+func CheckReplicateVolumesStatus() bool {
+	volumes, e := GetVolumes()
+	log.WithFields(log.Fields{
+		"volume": volumes,
+		"error":  e,
+	}).Error("volume list")
+
+	if e != nil {
+		return false
+	}
+	for _, v := range volumes {
+                log.WithFields(log.Fields{
+		         "msg": v.Type,
+		 }).Error("vol started")
+
+		if v.Type != 1 && v.Type != 2 {
+			continue
+		} else {
+
+			if v.State == 0 {
+				continue
+			} else {
+                        	log.WithFields(log.Fields{
+				        "msg": "vol started",
+			        }).Error("vol started")
+
+				return false
+			}
+		}
+	}
+	return true
 }
 
 //Exists check whether a given volume exist or not

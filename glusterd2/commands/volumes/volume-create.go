@@ -81,7 +81,7 @@ func createVolinfo(req *api.VolCreateReq) (*volume.Volinfo, error) {
 
 	for idx, subvolreq := range req.Subvols {
 		if subvolreq.ReplicaCount == 0 && subvolreq.Type == "replicate" {
-			return nil, errors.New("Replica count not specified")
+                        return nil, errors.New("Replica count not specified")
 		}
 
 		if subvolreq.ReplicaCount > 0 && subvolreq.ReplicaCount != len(subvolreq.Bricks) {

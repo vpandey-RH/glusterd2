@@ -1,0 +1,296 @@
+From 98e4aa42e458f528f61a1d5a2f8ab26fa863ad89 Mon Sep 17 00:00:00 2001
+From: root <root@dhcp41-154.lab.eng.blr.redhat.com>
+Date: Thu, 7 Dec 2017 17:43:44 +0530
+Subject: [PATCH 1/2] afr: Implement self-heal daemon in GD2
+
+Implement self-heal daemon using the daemon.go interface.
+The self-heal daemon will fail to start as the client volfile
+glustershd-server.vol is not being generated in GD2 while
+create a replicate volume.
+
+Signed-off-by: Vishal Pandey <vpandey@redhat.com>
+---
+ glusterd2/plugin/plugins.go        |   2 +
+ plugins/glustershd/glustershd.go   | 104 +++++++++++++++++++++++++++++++++++++
+ plugins/glustershd/init.go         |  39 ++++++++++++++
+ plugins/glustershd/rest.go         |  70 +++++++++++++++++++++++++
+ plugins/glustershd/transactions.go |  15 ++++++
+ 5 files changed, 230 insertions(+)
+ create mode 100644 plugins/glustershd/glustershd.go
+ create mode 100644 plugins/glustershd/init.go
+ create mode 100644 plugins/glustershd/rest.go
+ create mode 100644 plugins/glustershd/transactions.go
+
+diff --git a/glusterd2/plugin/plugins.go b/glusterd2/plugin/plugins.go
+index 1f32261..e50f04b 100644
+--- a/glusterd2/plugin/plugins.go
++++ b/glusterd2/plugin/plugins.go
+@@ -4,6 +4,7 @@ package plugin
+ 
+ import (
+ 	"github.com/gluster/glusterd2/plugins/georeplication"
++	"github.com/gluster/glusterd2/plugins/glustershd"
+ 	"github.com/gluster/glusterd2/plugins/hello"
+ )
+ 
+@@ -11,4 +12,5 @@ import (
+ var PluginsList = []GlusterdPlugin{
+ 	&hello.Plugin{},
+ 	&georeplication.Plugin{},
++	&glustershd.Plugin{},
+ }
+diff --git a/plugins/glustershd/glustershd.go b/plugins/glustershd/glustershd.go
+new file mode 100644
+index 0000000..f0ec4ed
+--- /dev/null
++++ b/plugins/glustershd/glustershd.go
+@@ -0,0 +1,104 @@
++package glustershd
++
++import (
++	"bytes"
++	"fmt"
++	"net"
++	"os/exec"
++	"path"
++
++	"github.com/cespare/xxhash"
++	"github.com/gluster/glusterd2/glusterd2/gdctx"
++
++	config "github.com/spf13/viper"
++)
++
++const (
++	glustershdBin = "glusterfs"
++)
++
++// Glustershd type represents information about Glustershd process
++type Glustershd struct {
++	//Externally consumable using methods of Gsyncd interface
++	binarypath     string
++	args           string
++	socketfilepath string
++	pidfilepath    string
++}
++
++// Name returns human-friendly name of the glustershd process. This is used for
++// logging
++func (b *Glustershd) Name() string {
++	return "glustershd"
++}
++
++//Path returns absolute path of the binary of glustershd process
++func (b *Glustershd) Path() string {
++	return b.binarypath
++}
++
++// Args returns arguments to be passed to glustershd process during spawn.
++func (b *Glustershd) Args() string {
++	shost, sport, _ := net.SplitHostPort(config.GetString("clientaddress"))
++	if shost == "" {
++		shost = "localhost"
++	}
++	_ = sport
++	volFileID := "gluster/glustershd"
++
++	logFile := path.Join(config.GetString("logdir"), "glusterfs", "glustershd.log")
++
++	var buffer bytes.Buffer
++	buffer.WriteString(fmt.Sprintf(" -s %s", shost))
++	buffer.WriteString(fmt.Sprintf(" --volfile-id %s", volFileID))
++	buffer.WriteString(fmt.Sprintf(" -p %s", b.PidFile()))
++	buffer.WriteString(fmt.Sprintf(" -l %s", logFile))
++	buffer.WriteString(fmt.Sprintf(" -S %s", b.SocketFile()))
++	buffer.WriteString(fmt.Sprintf(" --xlator-option *replicate*.node-uuid=%s", gdctx.MyUUID))
++
++	b.args = buffer.String()
++	return b.args
++}
++
++// SocketFile returns path to the socket file used for IPC.
++func (b *Glustershd) SocketFile() string {
++
++	if b.socketfilepath != "" {
++		return b.socketfilepath
++	}
++
++	glusterdSockDir := path.Join(config.GetString("rundir"), "gluster")
++	b.socketfilepath = fmt.Sprintf("%s/%x.socket", glusterdSockDir, xxhash.Sum64String(gdctx.MyUUID.String()))
++
++	return b.socketfilepath
++}
++
++// PidFile returns path to the pid file of self heal process.
++func (b *Glustershd) PidFile() string {
++
++	if b.pidfilepath != "" {
++		return b.pidfilepath
++	}
++
++	rundir := config.GetString("rundir")
++	b.pidfilepath = path.Join(rundir, "gluster", "glustershd.pid")
++
++	return b.pidfilepath
++}
++
++// newGlustershd returns a new instance of Glustershd type which implements the
++// daemon interface
++func newGlustershd() (*Glustershd, error) {
++	path, e := exec.LookPath(glustershdBin)
++	if e != nil {
++		return nil, e
++	}
++	glustershdObject := &Glustershd{binarypath: path}
++	return glustershdObject, nil
++}
++
++// ID returns the uniques identifier of the brick. The brick path is unique on a
++// node
++func (b *Glustershd) ID() string {
++	return "glustershd"
++}
+diff --git a/plugins/glustershd/init.go b/plugins/glustershd/init.go
+new file mode 100644
+index 0000000..c944c4a
+--- /dev/null
++++ b/plugins/glustershd/init.go
+@@ -0,0 +1,39 @@
++package glustershd
++
++import (
++	"github.com/gluster/glusterd2/glusterd2/servers/rest/route"
++	"github.com/gluster/glusterd2/glusterd2/transaction"
++	"github.com/prashanthpai/sunrpc"
++)
++
++// Plugin is a structure which implements GlusterdPlugin interface
++type Plugin struct {
++}
++
++// Name returns name of plugin
++func (p *Plugin) Name() string {
++	return "glustershd"
++}
++
++// SunRPCProgram returns sunrpc program to register with Glusterd
++func (p *Plugin) SunRPCProgram() sunrpc.Program {
++	return nil
++}
++
++// RestRoutes returns list of REST API routes to register with Glusterd
++func (p *Plugin) RestRoutes() route.Routes {
++	return route.Routes{
++		route.Route{
++			Name:        "GlustershEnable",
++			Method:      "POST",
++			Pattern:     "/volumes/{name}/heal/enable",
++			Version:     1,
++			HandlerFunc: glustershEnableHandler},
++	}
++}
++
++// RegisterStepFuncs registers transaction step functions with
++// Glusterd Transaction framework
++func (p *Plugin) RegisterStepFuncs() {
++	transaction.RegisterStepFunc(txnSelfHealStart, "selfheal-start.Commit")
++}
+diff --git a/plugins/glustershd/rest.go b/plugins/glustershd/rest.go
+new file mode 100644
+index 0000000..43c5c00
+--- /dev/null
++++ b/plugins/glustershd/rest.go
+@@ -0,0 +1,70 @@
++package glustershd
++
++import (
++	"net/http"
++
++	"github.com/gluster/glusterd2/glusterd2/gdctx"
++	restutils "github.com/gluster/glusterd2/glusterd2/servers/rest/utils"
++	"github.com/gluster/glusterd2/glusterd2/transaction"
++	"github.com/gluster/glusterd2/glusterd2/volume"
++	"github.com/gluster/glusterd2/pkg/api"
++	"github.com/gluster/glusterd2/pkg/errors"
++
++	"github.com/gorilla/mux"
++	log "github.com/sirupsen/logrus"
++)
++
++func glustershEnableHandler(w http.ResponseWriter, r *http.Request) {
++	// Implement the help logic and send response back as below
++	p := mux.Vars(r)
++	volname := p["name"]
++
++	ctx := r.Context()
++	logger := gdctx.GetReqLogger(ctx)
++
++	//validate volume name
++	v, err := volume.GetVolume(volname)
++	if err != nil {
++		restutils.SendHTTPError(ctx, w, http.StatusNotFound, errors.ErrVolNotFound.Error(), api.ErrCodeDefault)
++		return
++	}
++
++	// validate volume type
++	if v.Type != volume.Replicate && v.Type != volume.Disperse {
++		restutils.SendHTTPError(ctx, w, http.StatusBadRequest, "Volume Type not supported", api.ErrCodeDefault)
++		return
++	}
++
++	// Transaction which starts self heal daemon on all nodes with atleast one brick.
++	txn := transaction.NewTxn(ctx)
++	defer txn.Cleanup()
++
++	//Lock on Volume Name
++	lock, unlock, err := transaction.CreateLockSteps(volname)
++	if err != nil {
++		restutils.SendHTTPError(ctx, w, http.StatusInternalServerError, err.Error(), api.ErrCodeDefault)
++		return
++	}
++
++	txn.Nodes = v.Nodes()
++	txn.Steps = []*transaction.Step{
++		lock,
++		{
++			DoFunc: "selfheal-start.Commit",
++			Nodes:  txn.Nodes,
++		},
++		unlock,
++	}
++
++	_, err = txn.Do()
++	if err != nil {
++		logger.WithFields(log.Fields{
++			"error":   err.Error(),
++			"volname": volname,
++		}).Error("failed to start self heal daemon")
++		restutils.SendHTTPError(ctx, w, http.StatusInternalServerError, err.Error(), api.ErrCodeDefault)
++		return
++	}
++
++	restutils.SendHTTPResponse(ctx, w, http.StatusOK, "Glustershd Help")
++}
+diff --git a/plugins/glustershd/transactions.go b/plugins/glustershd/transactions.go
+new file mode 100644
+index 0000000..6c927a7
+--- /dev/null
++++ b/plugins/glustershd/transactions.go
+@@ -0,0 +1,15 @@
++package glustershd
++
++import (
++	"github.com/gluster/glusterd2/glusterd2/daemon"
++	"github.com/gluster/glusterd2/glusterd2/transaction"
++)
++
++func txnSelfHealStart(c transaction.TxnCtx) error {
++	glustershDaemon, err := newGlustershd()
++	if err != nil {
++		return err
++	}
++	err = daemon.Start(glustershDaemon, true)
++	return err
++}
+-- 
+2.13.5
+

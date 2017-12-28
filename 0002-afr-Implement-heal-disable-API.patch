@@ -1,7 +1,7 @@
 From 24dd4c6514a9bc4016f097d867fea5d559cd2d07 Mon Sep 17 00:00:00 2001
 From: root <root@dhcp41-154.lab.eng.blr.redhat.com>
 Date: Tue, 12 Dec 2017 15:05:53 +0530
-Subject: [PATCH] afr: Implement heal-disable API
+Subject: [PATCH 2/2] afr: Implement heal-disable API
 
 Implement self-heal disable API. The API is ineffective
 for the time being since self-heal daemon enable is still
@@ -25,7 +25,7 @@ index eaa0a7a..0765ba7 100644
 @@ -5,10 +5,9 @@ import (
  	"encoding/json"
  	"errors"
-
+ 
 +	"github.com/coreos/etcd/clientv3"
  	"github.com/gluster/glusterd2/glusterd2/store"
  	"github.com/pborman/uuid"
@@ -33,11 +33,11 @@ index eaa0a7a..0765ba7 100644
 -	"github.com/coreos/etcd/clientv3"
  	log "github.com/sirupsen/logrus"
  )
-
+ 
 @@ -120,6 +119,28 @@ func GetVolumes() ([]*Volinfo, error) {
  	return volumes, nil
  }
-
+ 
 +// CheckReplicateVolumesStatus retrieves the voliinfo objects from GetVolumes() function
 +// and checks if all replicate, Disperse volumes are stopped before
 +// stopping the self heal daemon.
@@ -63,8 +63,17 @@ index eaa0a7a..0765ba7 100644
  //Exists check whether a given volume exist or not
  func Exists(name string) bool {
  	resp, e := store.Store.Get(context.TODO(), volumePrefix+name)
-
-
+diff --git a/glusterd2/volume/struct.go b/glusterd2/volume/struct.go
+index da7b074..cbf6860 100644
+--- a/glusterd2/volume/struct.go
++++ b/glusterd2/volume/struct.go
+@@ -71,6 +71,7 @@ type Volinfo struct {
+ 	Bricks       []brick.Brickinfo
+ 	Auth         VolAuth // TODO: should not be returned to client
+ 	GraphMap     map[string]string
++	HealFlag     bool
+ }
+ 
  // VolAuth represents username and password used by trusted/internal clients
 diff --git a/plugins/glustershd/glustershd.go b/plugins/glustershd/glustershd.go
 index f0ec4ed..8ecc2e3 100644
@@ -76,9 +85,9 @@ index f0ec4ed..8ecc2e3 100644
  	_ = sport
 -	volFileID := "gluster/glustershd"
 +	volFileID := "glustershd-server"
-
+ 
  	logFile := path.Join(config.GetString("logdir"), "glusterfs", "glustershd.log")
-
+ 
 diff --git a/plugins/glustershd/init.go b/plugins/glustershd/init.go
 index c944c4a..1c64aeb 100644
 --- a/plugins/glustershd/init.go
@@ -95,7 +104,7 @@ index c944c4a..1c64aeb 100644
 +			HandlerFunc: glustershDisableHandler},
  	}
  }
-
+ 
 @@ -36,4 +42,5 @@ func (p *Plugin) RestRoutes() route.Routes {
  // Glusterd Transaction framework
  func (p *Plugin) RegisterStepFuncs() {
@@ -109,7 +118,7 @@ index 43c5c00..6eafda5 100644
 @@ -46,16 +46,28 @@ func glustershEnableHandler(w http.ResponseWriter, r *http.Request) {
  		return
  	}
-
+ 
 +	v.HealFlag = true
 +
  	txn.Nodes = v.Nodes()
@@ -125,7 +134,7 @@ index 43c5c00..6eafda5 100644
  		},
  		unlock,
  	}
-
+ 
 +	if err := txn.Ctx.Set("volinfo", v); err != nil {
 +		logger.WithError(err).Error("failed to set volinfo in transaction context")
 +		restutils.SendHTTPError(ctx, w, http.StatusInternalServerError, err.Error(), api.ErrCodeDefault)
@@ -136,7 +145,7 @@ index 43c5c00..6eafda5 100644
  	if err != nil {
  		logger.WithFields(log.Fields{
 @@ -68,3 +80,71 @@ func glustershEnableHandler(w http.ResponseWriter, r *http.Request) {
-
+ 
  	restutils.SendHTTPResponse(ctx, w, http.StatusOK, "Glustershd Help")
  }
 +
@@ -217,7 +226,7 @@ index 6c927a7..38e3447 100644
  	"github.com/gluster/glusterd2/glusterd2/transaction"
 +	"github.com/gluster/glusterd2/glusterd2/volume"
  )
-
+ 
  func txnSelfHealStart(c transaction.TxnCtx) error {
 @@ -13,3 +14,16 @@ func txnSelfHealStart(c transaction.TxnCtx) error {
  	err = daemon.Start(glustershDaemon, true)
@@ -236,6 +245,6 @@ index 6c927a7..38e3447 100644
 +
 +	return nil
 +}
---
+-- 
 2.13.5
 
