@@ -1,0 +1,5 @@
+workdir: "/usr/local/var/lib/glusterd2"
+peeraddress: "10.70.41.154:24008"
+clientaddress: "10.70.41.154:24007"
+etcdcurls: "http://10.70.41.154:2379"
+etcdpurls: "http://10.70.41.154:2380"

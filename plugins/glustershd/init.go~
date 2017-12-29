@@ -34,19 +34,13 @@ func (p *Plugin) RestRoutes() route.Routes {
 			Method:      "POST",
 			Pattern:     "/volumes/{name}/heal/disable",
 			Version:     1,
-		HandlerFunc: glustershDisableHandler},
+			HandlerFunc: glustershDisableHandler},
                 route.Route{
                         Name: "GlustershInfo",
                         Method: "GET",
-                        Pattern: "/volumes/{name}/{opts}/heal-info",
+                        Pattern: "/volumes/{name}/{opts}/heal",
                         Version: 1,
-                        HandlerFunc: glustershInfo},
-		route.Route{
-			Name: "GlustershInfo2",
-			Method: "GET",
-			Pattern: "/volumes/{name}/heal-info",
-			Version: 1,
-			HandlerFunc: glustershInfo},
+                        HandlerFunc: glustershInfo}
 	}
 }
 
