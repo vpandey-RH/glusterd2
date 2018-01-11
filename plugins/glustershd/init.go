@@ -34,19 +34,25 @@ func (p *Plugin) RestRoutes() route.Routes {
 			Method:      "POST",
 			Pattern:     "/volumes/{name}/heal/disable",
 			Version:     1,
-		HandlerFunc: glustershDisableHandler},
-                route.Route{
-                        Name: "GlustershInfo",
-                        Method: "GET",
-                        Pattern: "/volumes/{name}/{opts}/heal-info",
-                        Version: 1,
-                        HandlerFunc: glustershInfo},
+			HandlerFunc: glustershDisableHandler},
 		route.Route{
-			Name: "GlustershInfo2",
-			Method: "GET",
-			Pattern: "/volumes/{name}/heal-info",
-			Version: 1,
+			Name:        "GlustershInfo",
+			Method:      "GET",
+			Pattern:     "/volumes/{name}/{opts}/heal-info",
+			Version:     1,
 			HandlerFunc: glustershInfo},
+		route.Route{
+			Name:        "GlustershInfo2",
+			Method:      "GET",
+			Pattern:     "/volumes/{name}/heal-info",
+			Version:     1,
+			HandlerFunc: glustershInfo},
+		route.Route{
+			Name:        "GranularHealEnable",
+			Method:      "POST",
+			Pattern:     "/volumes/{name}/heal/granular-entry/enable",
+			Version:     1,
+			HandlerFunc: granularHealEnableHandler},
 	}
 }
 
@@ -55,4 +61,5 @@ func (p *Plugin) RestRoutes() route.Routes {
 func (p *Plugin) RegisterStepFuncs() {
 	transaction.RegisterStepFunc(txnSelfHealStart, "selfheal-start.Commit")
 	transaction.RegisterStepFunc(txnSelfHealStop, "selfheal-stop.Commit")
+	transaction.RegisterStepFunc(txnGranularEntryHealEnable, "granular-heal.Enable")
 }

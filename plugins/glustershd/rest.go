@@ -17,6 +17,7 @@ import (
 	"github.com/gluster/glusterd2/pkg/errors"
 
 	"github.com/gorilla/mux"
+	"github.com/pborman/uuid"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -242,5 +243,84 @@ func glustershInfo(w http.ResponseWriter, r *http.Request) {
 	JsonOutput := runGlfshealWithArgs(r, volname, option)
 
 	restutils.SendHTTPResponse(ctx, w, http.StatusOK, JsonOutput)
+
+}
+
+func granularHealEnableHandler(w http.ResponseWriter, r *http.Request) {
+	p := mux.Vars(r)
+	volname := p["name"]
+
+	ctx := r.Context()
+	logger := gdctx.GetReqLogger(ctx)
+
+	//validate volume name
+	v, err := volume.GetVolume(volname)
+	if err != nil {
+		restutils.SendHTTPError(ctx, w, http.StatusNotFound, errors.ErrVolNotFound.Error(), api.ErrCodeDefault)
+		return
+	}
+
+	// validate volume type
+	if v.Type != volume.Replicate && v.Type != volume.Disperse {
+		restutils.SendHTTPError(ctx, w, http.StatusBadRequest, "Volume Type not supported", api.ErrCodeDefault)
+		return
+	}
+
+	txn := transaction.NewTxn(ctx)
+	defer txn.Cleanup()
+
+	//Lock on Volume Name
+	lock, unlock, err := transaction.CreateLockSteps(volname)
+	if err != nil {
+		restutils.SendHTTPError(ctx, w, http.StatusInternalServerError, err.Error(), api.ErrCodeDefault)
+		return
+	}
+
+	v.GranularHealEntry = true
+
+	txn.Nodes = v.Nodes()
+	txn.Steps = []*transaction.Step{
+		lock,
+		{
+			DoFunc: "granular-heal.Enable",
+			Nodes:  []uuid.UUID{gdctx.MyUUID},
+		},
+		{
+			DoFunc: "vol-option.UpdateVolinfo",
+			Nodes:  txn.Nodes,
+		},
+		unlock,
+	}
+
+	if err := txn.Ctx.Set("volinfo", v); err != nil {
+		logger.WithError(err).Error("failed to set volinfo in transaction context")
+		restutils.SendHTTPError(ctx, w, http.StatusInternalServerError, err.Error(), api.ErrCodeDefault)
+		return
+	}
+
+	if err := txn.Ctx.Set("volname", volname); err != nil {
+		logger.WithError(err).Error("failed to set volname in transaction context")
+		restutils.SendHTTPError(ctx, w, http.StatusInternalServerError, err.Error(), api.ErrCodeDefault)
+		return
+	}
+
+	var option []string
+
+	option = append(option, "granular-entry-heal-op")
+	if err := txn.Ctx.Set("option", option); err != nil {
+		logger.WithError(err).Error("failed to set volname in transaction context")
+		restutils.SendHTTPError(ctx, w, http.StatusInternalServerError, err.Error(), api.ErrCodeDefault)
+		return
+	}
+
+	err = txn.Do()
+	if err != nil {
+		logger.WithFields(log.Fields{
+			"error":   err.Error(),
+			"volname": volname,
+		}).Error("failed to enable Granular Entry Heal Option")
+		restutils.SendHTTPError(ctx, w, http.StatusInternalServerError, err.Error(), api.ErrCodeDefault)
+		return
+	}
 
 }
