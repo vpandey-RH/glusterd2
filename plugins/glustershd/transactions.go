@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/gluster/glusterd2/glusterd2/daemon"
+	"github.com/gluster/glusterd2/glusterd2/gdctx"
 	"github.com/gluster/glusterd2/glusterd2/transaction"
 	"github.com/gluster/glusterd2/glusterd2/volume"
 )
@@ -30,7 +31,7 @@ func selfhealdAction(c transaction.TxnCtx, action string) error {
 	return err
 }
 
-func runGlfshealBin(volname string, option []string) error {
+func runGlfshealBin(c transaction.TxnCtx, volname string, option []string) error {
 	var out bytes.Buffer
 	var buffer bytes.Buffer
 
@@ -61,6 +62,8 @@ func runGlfshealBin(volname string, option []string) error {
 		return err
 	}
 
+	c.SetNodeResult(gdctx.MyUUID, "stdout", out.String())
+
 	return nil
 }
 
@@ -70,6 +73,22 @@ func txnSelfHealStart(c transaction.TxnCtx) error {
 
 func txnSelfHealStop(c transaction.TxnCtx) error {
 	return selfhealdAction(c, "actionStop")
+}
+
+func txnHealInfo(c transaction.TxnCtx) error {
+	var volname string
+	var option []string
+
+	if err := c.Get("volname", &volname); err != nil {
+		return err
+	}
+
+	if err := c.Get("option", &option); err != nil {
+		return err
+	}
+
+	return runGlfshealBin(c, volname, option)
+
 }
 
 func txnGranularEntryHealEnable(c transaction.TxnCtx) error {
@@ -84,5 +103,5 @@ func txnGranularEntryHealEnable(c transaction.TxnCtx) error {
 		return err
 	}
 
-	return runGlfshealBin(volname, option)
+	return runGlfshealBin(c, volname, option)
 }
